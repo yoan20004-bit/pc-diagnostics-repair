@@ -1,0 +1,8 @@
+{
+  "languageMode": "nonstrict",
+  "lint": {
+    "*": true,
+    "LocalUnused": false
+  },
+  "globals": ["game", "workspace", "script", "shared", "plugin"]
+}

@@ -1,0 +1,7 @@
+std = "roblox"
+
+[rules]
+# The UI builder intentionally discards the instances it parents.
+unused_variable = "warn"
+# String interpolation is used throughout; selene's older lint flags it.
+mixed_table = "allow"
