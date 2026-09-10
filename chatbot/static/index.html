@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Local AI Chat</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%237c6cff'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/vendor/github-dark.min.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ───────────── Sidebar ───────────── -->
+    <aside class="sidebar" id="sidebar" aria-label="Chat history">
+      <div class="sidebar-header">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span class="brand-name">Local AI Chat</span>
+        </div>
+        <button class="icon-btn" id="close-sidebar" title="Close sidebar" aria-label="Close sidebar">
+          <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <button class="new-chat-btn" id="new-chat" type="button">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        New chat
+      </button>
+
+      <nav class="chat-list" id="chat-list" aria-label="Past chats">
+        <p class="chat-list-empty" id="chat-list-empty">No conversations yet.</p>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="status" id="status" title="Ollama connection status">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="status-text" id="status-text">Checking Ollama…</span>
+        </div>
+        <button class="text-btn" id="clear-all" type="button" title="Delete all chats">Clear history</button>
+      </div>
+    </aside>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+    <!-- ───────────── Main chat area ───────────── -->
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn" id="open-sidebar" title="Open sidebar" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <h1 class="chat-title" id="chat-title">New chat</h1>
+        <label class="model-picker">
+          <span class="visually-hidden">Model</span>
+          <select id="model-select" aria-label="Model">
+            <option value="">Auto</option>
+          </select>
+        </label>
+      </header>
+
+      <section class="messages" id="messages" aria-live="polite">
+        <div class="welcome" id="welcome">
+          <div class="welcome-logo"></div>
+          <h2>How can I help today?</h2>
+          <p>Everything runs on this machine through Ollama. Nothing leaves your computer.</p>
+          <div class="suggestions">
+            <button class="suggestion" data-prompt="Explain how a transformer language model works in simple terms.">Explain how LLMs work</button>
+            <button class="suggestion" data-prompt="Write a Python function that checks if a string is a palindrome, with tests.">Write a Python function</button>
+            <button class="suggestion" data-prompt="Give me a 5-item checklist for diagnosing a PC that won't boot.">PC won't boot checklist</button>
+            <button class="suggestion" data-prompt="Summarize the differences between TCP and UDP in a table.">TCP vs UDP table</button>
+          </div>
+        </div>
+      </section>
+
+      <footer class="composer-wrap">
+        <form class="composer" id="composer" autocomplete="off">
+          <textarea id="input" rows="1" placeholder="Message the model…  (Enter to send, Shift+Enter for newline)" aria-label="Message"></textarea>
+          <button class="send-btn" id="send" type="submit" title="Send" aria-label="Send">
+            <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+          <button class="send-btn stop" id="stop" type="button" title="Stop generating" aria-label="Stop generating" hidden>
+            <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </form>
+        <p class="composer-hint">Local model via Ollama · responses may be inaccurate.</p>
+      </footer>
+    </main>
+  </div>
+
+  <template id="message-template">
+    <article class="message">
+      <div class="avatar"></div>
+      <div class="bubble-wrap">
+        <div class="bubble"><div class="content"></div></div>
+        <div class="meta"></div>
+      </div>
+    </article>
+  </template>
+
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/vendor/highlight.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
