@@ -157,6 +157,7 @@ async def ollama_status() -> dict[str, Any]:
             "models": [],
             "model": None,
             "preferred_model": PREFERRED_MODEL,
+            "preferred_installed": False,
         }
     return {
         "ok": True,
@@ -165,6 +166,9 @@ async def ollama_status() -> dict[str, Any]:
         "models": installed,
         "model": pick_model(installed),
         "preferred_model": PREFERRED_MODEL,
+        "preferred_installed": any(
+            n == PREFERRED_MODEL or n.split(":", 1)[0] == PREFERRED_MODEL.split(":", 1)[0] for n in installed
+        ),
     }
 
 
@@ -206,6 +210,40 @@ async def models() -> dict[str, Any]:
     if not status["ok"]:
         raise HTTPException(status_code=503, detail=status["error"])
     return {"models": status["models"], "default": status["model"]}
+
+
+# --------------------------------------------------------------------------- #
+# API: model download (so a fresh machine can fetch llama3 from the UI)
+# --------------------------------------------------------------------------- #
+
+
+class PullRequest(BaseModel):
+    model: str = Field(default=PREFERRED_MODEL, min_length=1, max_length=120, pattern=r"^[\w.\-/:]+$")
+
+
+async def _stream_pull(model: str) -> AsyncIterator[bytes]:
+    try:
+        stream = await client.pull(model=model, stream=True)
+        async for progress in stream:
+            yield _ndjson({
+                "type": "progress",
+                "status": progress.status or "",
+                "completed": progress.completed or 0,
+                "total": progress.total or 0,
+            })
+        yield _ndjson({"type": "done", "model": model})
+    except ollama.ResponseError as exc:
+        yield _ndjson({"type": "error", "error": f"Ollama error: {exc.error}"})
+    except (httpx.HTTPError, OSError) as exc:
+        yield _ndjson({"type": "error", "error": f"Cannot reach Ollama at {OLLAMA_HOST}: {exc.__class__.__name__}"})
+
+
+@app.post("/api/pull")
+async def pull_model(body: PullRequest | None = None) -> StreamingResponse:
+    model = body.model if body else PREFERRED_MODEL
+    log.info("Pulling model %s", model)
+    return StreamingResponse(_stream_pull(model), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # --------------------------------------------------------------------------- #

@@ -18,7 +18,41 @@ leaves your machine.
 - Dark, responsive UI that works on phones (collapsible sidebar)
 - Ollama health indicator with clear error messages when it is offline
 
-## Prerequisites
+## Quick start from scratch (nothing installed yet)
+
+One script installs Ollama, downloads **llama3**, sets up Python, and opens the app.
+You need Python 3.10+ (<https://www.python.org/downloads/>, tick "Add python.exe to PATH" on Windows).
+
+**Windows** – double-click `setup.bat`, or in a terminal:
+
+```bat
+cd chatbot
+setup.bat
+```
+
+**macOS / Linux**:
+
+```bash
+cd chatbot
+./setup.sh
+```
+
+The script:
+
+1. finds Python and installs Ollama if it is missing (winget on Windows, the
+   official installer on Linux, Homebrew on macOS),
+2. starts the Ollama server if it is not already running,
+3. runs `ollama pull llama3` (about 4.7 GB, downloaded once),
+4. creates `.venv/` and installs `requirements.txt`,
+5. launches the app on <http://127.0.0.1:8000> and opens your browser.
+
+Run the same script again any time to start the app; steps that are already
+done are skipped. If Ollama is running but llama3 is missing, the sidebar also
+shows a **Download llama3** button that pulls the model with a progress bar.
+
+## Manual setup
+
+### Prerequisites
 
 | Requirement | Notes |
 | --- | --- |
@@ -26,7 +60,7 @@ leaves your machine.
 | [Ollama](https://ollama.com/download) | macOS, Windows, or Linux installer |
 | A model | `llama3` by default, or any model you have pulled |
 
-## 1. Start Ollama
+### 1. Start Ollama
 
 Install Ollama, then pull and run a model once so it is downloaded:
 
@@ -51,7 +85,7 @@ You do not have to use `llama3`. The backend picks the first installed model if
 `llama3` is missing, and you can choose any installed model from the dropdown
 in the top bar.
 
-## 2. Install the Python dependencies
+### 2. Install the Python dependencies
 
 From this `chatbot/` directory:
 
@@ -65,7 +99,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 3. Launch the web app
+### 3. Launch the web app
 
 ```bash
 uvicorn main:app --reload --port 8000
@@ -95,6 +129,8 @@ OLLAMA_MODEL=mistral uvicorn main:app --port 8000
 
 ```
 chatbot/
+├── setup.bat            # Windows: install Ollama + llama3 + deps, then launch
+├── setup.sh             # macOS / Linux: same
 ├── main.py              # FastAPI app: API + static file serving
 ├── requirements.txt
 ├── data/chats.json      # created on first run; your chat history
@@ -118,6 +154,7 @@ chatbot/
 | `DELETE` | `/api/chats/{id}` | Delete one chat |
 | `DELETE` | `/api/chats` | Delete all chats |
 | `POST` | `/api/chat` | Send a message; streams NDJSON events |
+| `POST` | `/api/pull` | Download a model (`{"model": "llama3"}`); streams progress |
 
 The stream from `POST /api/chat` is one JSON object per line:
 
@@ -137,7 +174,7 @@ Interactive API docs are available at <http://127.0.0.1:8000/docs>.
 
 - **"Ollama offline" in the sidebar** – run `ollama serve` (or `ollama run llama3`)
   and the indicator turns green within a few seconds.
-- **"No models installed"** – run `ollama pull llama3`.
+- **"No models installed"** – click **Download llama3** in the sidebar, or run `ollama pull llama3`.
 - **Ollama on another machine / port** – set `OLLAMA_HOST=http://host:11434`.
 - **Port 8000 already in use** – pass a different `--port` to uvicorn.
 - **Reset history** – stop the server and delete `data/chats.json`.

@@ -17,6 +17,7 @@
   const modelSelect = $("model-select");
   const statusEl = $("status");
   const statusText = $("status-text");
+  const pullBtn = $("pull-model");
   const template = $("message-template");
 
   // ───────────────────────── State ─────────────────────────
@@ -24,6 +25,7 @@
     chats: [],            // sidebar summaries
     currentId: null,      // active chat id (null = fresh, unsaved chat)
     streaming: false,
+    pulling: false,
     abort: null,          // AbortController for the in-flight request
     health: null,
   };
@@ -163,6 +165,11 @@
       statusText.textContent = `Ollama · ${h.model}`;
       statusEl.title = `${h.models.length} model(s) at ${h.host}`;
     }
+    // Offer a one-click download when Ollama is up but the preferred model is missing.
+    if (!state.pulling) {
+      pullBtn.hidden = !(h.ok && !h.preferred_installed);
+      pullBtn.textContent = `Download ${h.preferred_model || "llama3"}`;
+    }
     // Populate the model picker.
     const previous = modelSelect.value;
     modelSelect.innerHTML = "";
@@ -226,6 +233,60 @@
       chatListEl.appendChild(item);
     }
   }
+
+  // ───────────────────────── Model download ─────────────────────────
+  const fmtGB = (b) => (b / 1e9).toFixed(2) + " GB";
+
+  async function pullPreferredModel() {
+    if (state.pulling) return;
+    const model = state.health?.preferred_model || "llama3";
+    state.pulling = true;
+    pullBtn.disabled = true;
+    pullBtn.textContent = `Downloading ${model}…`;
+    let failed = null;
+    try {
+      const res = await fetch("/api/pull", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }),
+      });
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = pending.indexOf("\n")) >= 0) {
+          const line = pending.slice(0, nl).trim();
+          pending = pending.slice(nl + 1);
+          if (!line) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch (_) { continue; }
+          if (evt.type === "progress") {
+            const pct = evt.total ? Math.round((evt.completed / evt.total) * 100) : null;
+            pullBtn.textContent = pct !== null
+              ? `Downloading ${model}… ${pct}% (${fmtGB(evt.completed)} / ${fmtGB(evt.total)})`
+              : `${evt.status || "Working"}…`;
+          } else if (evt.type === "error") {
+            failed = evt.error;
+          }
+        }
+      }
+    } catch (err) {
+      failed = err.message;
+    } finally {
+      state.pulling = false;
+      pullBtn.disabled = false;
+      if (failed) {
+        pullBtn.textContent = `Download failed – retry`;
+        pullBtn.title = failed;
+        alert(`Model download failed: ${failed}`);
+      }
+      await refreshHealth();
+    }
+  }
+  pullBtn.addEventListener("click", pullPreferredModel);
 
   // ───────────────────────── Chat actions ─────────────────────────
   function newChat() {

@@ -119,6 +119,12 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .status.ok .status-dot { background: var(--ok); box-shadow: 0 0 8px rgba(61, 220, 151, 0.6); }
 .status.warn .status-dot { background: var(--warn); }
 .status.err .status-dot { background: var(--danger); }
+.pull-btn {
+  border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent-strong);
+  border-radius: 8px; padding: 7px 10px; font-size: 13px; font-weight: 500; text-align: left;
+}
+.pull-btn:hover { background: var(--accent); color: #fff; }
+.pull-btn:disabled { opacity: 0.7; cursor: progress; }
 .text-btn { background: none; border: none; color: var(--text-faint); padding: 0; text-align: left; }
 .text-btn:hover { color: var(--danger); }
 

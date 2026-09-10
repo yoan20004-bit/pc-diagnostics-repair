@@ -4,4 +4,4 @@ PC Diagnostics and Repair Software
 ## Local AI Chat
 
 A fully local ChatGPT-style web app (FastAPI + Ollama + vanilla JS) lives in [`chatbot/`](chatbot/README.md).
-See its README for setup: start Ollama with `ollama run llama3`, then run `uvicorn main:app --reload --port 8000` from that folder.
+From-scratch setup: run `chatbot/setup.bat` (Windows) or `chatbot/setup.sh` (macOS/Linux) to install Ollama, download llama3, and launch the app. See its README for details.
