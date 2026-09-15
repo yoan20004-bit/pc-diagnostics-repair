@@ -73,7 +73,11 @@ wallet, so never expose it without a token, and use a VPN or SSH tunnel for remo
 | **Feed watchdog + supervisor** | Alerts (log + Telegram) when prices stop arriving; `npm run supervise` restarts the bot if it ever crashes. `/api/health` for external monitors. |
 | **Two-way Telegram** | `/status`, `/positions`, `/pause`, `/resume`, `/scan`, `/close SYMBOL [pct]`, `/stop`, `/start` from the configured chat only. |
 | **Encrypted key storage** | `npm run wallet:encrypt` stores the key as `data/wallet.enc` (scrypt + AES-256-GCM); the bot asks for the password at start or reads `WALLET_PASSWORD`. `PRIVATE_KEY` can then be removed from `.env`. |
-| **Charts and analytics on the panel** | Candle chart per token with entry, stop, take-profit and trailing lines; PnL by strategy, exit reason, token and hour. |
+| **Charts and analytics on the panel** | Candle chart per token with entry, stop, take-profit and trailing lines; PnL by strategy, lane, exit reason, token and hour. |
+| **New-launch sniping lane (opt-in)** | A second strategy with its own budget, limits and exits that buys tokens minutes after launch when the first tape looks healthy: buyer pressure, liquidity depth, holder growth, no mint/freeze authority, clean holder profile, sell path proven. Off by default. |
+| **Holder-quality analysis** | Three RPC calls per candidate: excludes pools and program accounts from concentration, detects bundled launches (clusters of near-identical balances) and throwaway wallets (top holders with no SOL). Bundled tokens are hard-rejected. |
+| **Streaming prices** | Subscribes to a pool's token vaults over the RPC WebSocket for sub-second prices on held and tracked tokens (PumpSwap, Orca, Meteora pool-owned vaults; Raydium v4 decoded). Held tokens get an exit check within a second of a move. Polling remains as fallback. |
+| **Attention signals** | DexScreener boosts and socials plus Jupiter trader-growth and holder-change stats nudge the scanner ranking and the launch score. X and Telegram scraping are not included (they need paid API access). |
 
 ## Features
 
@@ -187,6 +191,20 @@ be (0..1). `params` holds indicator periods and the composite weights.
 `emaFast` / `emaSlow`). `regime` blocks entries when SOL is weak (`solEmaPeriod` on the
 higher timeframe, `maxSolDrop1hPct`). Both default on.
 
+### Launch lane (`launch`)
+Off by default. `enabled`, `sizeSol`, `maxOpen`, `maxPerHour` bound the budget. Entry filters:
+`minAgeMinutes` / `maxAgeMinutes`, `minLiquidityUsd` / `maxLiquidityUsd`, `minHolders`,
+`minBuys5m`, `minBuySellRatio5m`, `minVolume5mUsd`, `maxPriceChange5mPct`, `requireSocials`,
+`maxTopHoldersPct`, `maxBundledHolders`, `maxFreshWallets`, `minScore`, `maxRoundTripLossPct`.
+`exits` is a separate profile (wide stop, aggressive ladder, short max hold). The daily loss
+circuit breaker and the regime filter apply to this lane too.
+
+### Holder analysis (`holders`) and streaming (`stream`)
+`holders.enabled` runs the deep holder check on scanner candidates (`topN`,
+`maxBundledHolders`, `maxFreshWallets`, `freshWalletMaxSol`). `stream.enabled` turns on the
+WebSocket vault subscriptions (`maxSubscriptions`); needs an RPC with a `wss://` endpoint,
+which Helius, QuickNode and the public RPC all provide.
+
 ### Risk
 | Key | Meaning |
 |---|---|
@@ -296,9 +314,9 @@ src/
   config.ts           zod-validated config + env
   wallet.ts           Phantom/JSON keypair loading, wallet generation
   rpc.ts              Solana RPC helpers (balances, mint info, holders, priority fees, send+confirm)
-  market/             jupiter (price, tokens, shield, ultra, swap), dexscreener, geckoterminal, candles
-  analysis/           indicators, safety scoring, scanner, market regime
-  strategies/         momentum, meanReversion, breakout, composite, filters (HTF gate, ATR helpers)
+  market/             jupiter (price, tokens, shield, ultra, swap), dexscreener, geckoterminal, candles, stream (WebSocket vault prices)
+  analysis/           indicators, safety scoring, scanner (+ launch discovery), market regime, holder quality
+  strategies/         momentum, meanReversion, breakout, composite, filters (HTF gate, ATR helpers), launch (new-token scorer)
   trading/            risk manager, position exits, live + paper executors
   storage/db.ts       SQLite persistence
   notify/telegram.ts  alerts

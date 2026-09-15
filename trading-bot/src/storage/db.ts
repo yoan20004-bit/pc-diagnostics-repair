@@ -48,6 +48,7 @@ export class Store {
     add('trades', 'expected_price_sol', 'REAL');
     add('trades', 'slippage_pct', 'REAL');
     add('trades', 'exit_kind', 'TEXT');
+    add('positions', 'lane', 'TEXT');
   }
 
   /* ---------------- positions ---------------- */
@@ -56,16 +57,16 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO positions (id, mint, symbol, decimals, amount_raw, cost_sol, entry_price_sol, entry_price_usd, opened_at, hwm_sol,
-          ladder_done, realised_sol, strategy, status, closed_at, close_reason, stop_pct)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ladder_done, realised_sol, strategy, status, closed_at, close_reason, stop_pct, lane)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET amount_raw=excluded.amount_raw, cost_sol=excluded.cost_sol, hwm_sol=excluded.hwm_sol,
            ladder_done=excluded.ladder_done, realised_sol=excluded.realised_sol, status=excluded.status,
            closed_at=excluded.closed_at, close_reason=excluded.close_reason, entry_price_sol=excluded.entry_price_sol,
-           entry_price_usd=excluded.entry_price_usd, stop_pct=excluded.stop_pct`,
+           entry_price_usd=excluded.entry_price_usd, stop_pct=excluded.stop_pct, lane=excluded.lane`,
       )
       .run(
         p.id, p.mint, p.symbol, p.decimals, p.amountRaw, p.costSol, p.entryPriceSol, p.entryPriceUsd, p.openedAt, p.highWaterMarkSol,
-        p.ladderDone, p.realisedSol, p.strategy, p.status, p.closedAt ?? null, p.closeReason ?? null, p.stopPct ?? null,
+        p.ladderDone, p.realisedSol, p.strategy, p.status, p.closedAt ?? null, p.closeReason ?? null, p.stopPct ?? null, p.lane ?? 'core',
       );
   }
 
@@ -132,6 +133,7 @@ export class Store {
   /** Performance breakdowns for the analytics tab. */
   analytics(): {
     byStrategy: Breakdown[];
+    byLane: Breakdown[];
     byExitKind: Breakdown[];
     byToken: Breakdown[];
     byHour: Breakdown[];
@@ -150,6 +152,7 @@ export class Store {
       FROM trades t LEFT JOIN positions p ON p.id = t.position_id WHERE t.side = 'sell' GROUP BY k ORDER BY pnl DESC`;
     return {
       byStrategy: q('?', base.replace('%K%', `COALESCE(p.strategy, 'unknown')`)),
+      byLane: q('?', base.replace('%K%', `COALESCE(p.lane, 'core')`)),
       byExitKind: q('?', base.replace('%K%', `COALESCE(t.exit_kind, 'unknown')`)),
       byToken: q('?', base.replace('%K%', `t.symbol`)),
       byHour: q('?', base.replace('%K%', `strftime('%H', t.ts / 1000, 'unixepoch')`).replace('ORDER BY pnl DESC', 'ORDER BY k')),
@@ -202,6 +205,7 @@ function rowToPosition(r: Row): Position {
     closedAt: r.closed_at == null ? undefined : Number(r.closed_at),
     closeReason: r.close_reason == null ? undefined : String(r.close_reason),
     stopPct: r.stop_pct == null ? undefined : Number(r.stop_pct),
+    lane: r.lane === 'launch' ? 'launch' : 'core',
   };
 }
 

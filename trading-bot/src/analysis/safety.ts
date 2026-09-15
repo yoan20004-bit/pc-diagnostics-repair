@@ -1,7 +1,8 @@
 import type { ScannerFilters } from '../config.js';
 import type { MintInfo } from '../rpc.js';
 import type { ShieldWarning } from '../market/jupiter.js';
-import type { PairInfo, SafetyResult, TokenMeta } from '../types.js';
+import type { HolderQuality, PairInfo, SafetyResult, TokenMeta } from '../types.js';
+import { holderPenalties } from './holders.js';
 
 const DANGEROUS_2022_EXTENSIONS = new Set(['transferFeeConfig', 'permanentDelegate', 'transferHook', 'defaultAccountState', 'nonTransferable']);
 
@@ -11,6 +12,8 @@ export interface SafetyInput {
   pair?: PairInfo;
   mintInfo?: MintInfo;
   holderShare?: { topPct: number; largestPct: number };
+  holderQuality?: HolderQuality;
+  holderLimits?: { maxBundledHolders: number; maxFreshWallets: number };
   shieldWarnings?: ShieldWarning[];
 }
 
@@ -22,7 +25,7 @@ export function assessSafety(input: SafetyInput, f: ScannerFilters): SafetyResul
   const reasons: string[] = [];
   const hardFail: string[] = [];
   let score = 100;
-  const { token, pair, mintInfo, holderShare, shieldWarnings } = input;
+  const { token, pair, mintInfo, holderShare, shieldWarnings, holderQuality } = input;
 
   // --- on-chain authorities -------------------------------------------------
   const mintAuthOn = mintInfo ? mintInfo.mintAuthority !== null : token?.audit?.mintAuthorityDisabled === false;
@@ -116,14 +119,22 @@ export function assessSafety(input: SafetyInput, f: ScannerFilters): SafetyResul
       reasons.push(`${token.holderCount} holders < min ${f.minHolders}`);
     }
   }
-  const topPct = holderShare?.topPct ?? token?.audit?.topHoldersPercentage;
-  if (topPct !== undefined && topPct > f.maxTopHoldersPct) {
-    score -= 20;
-    reasons.push(`top holders own ${topPct.toFixed(1)}% (> ${f.maxTopHoldersPct}%)`);
-  }
-  if (holderShare && holderShare.largestPct > 30) {
-    score -= 15;
-    reasons.push(`single account holds ${holderShare.largestPct.toFixed(1)}%`);
+  if (holderQuality) {
+    // pools excluded, bundles and throwaway wallets detected
+    const hp = holderPenalties(holderQuality, { maxTopHoldersPct: f.maxTopHoldersPct, maxBundledHolders: input.holderLimits?.maxBundledHolders ?? 4, maxFreshWallets: input.holderLimits?.maxFreshWallets ?? 8 });
+    hardFail.push(...hp.hardFail);
+    reasons.push(...hp.reasons);
+    score -= hp.penalty;
+  } else {
+    const topPct = holderShare?.topPct ?? token?.audit?.topHoldersPercentage;
+    if (topPct !== undefined && topPct > f.maxTopHoldersPct) {
+      score -= 20;
+      reasons.push(`top holders own ${topPct.toFixed(1)}% (> ${f.maxTopHoldersPct}%)`);
+    }
+    if (holderShare && holderShare.largestPct > 30) {
+      score -= 15;
+      reasons.push(`single account holds ${holderShare.largestPct.toFixed(1)}%`);
+    }
   }
   if (token?.audit?.devBalancePercentage !== undefined && token.audit.devBalancePercentage > 15) {
     score -= 10;

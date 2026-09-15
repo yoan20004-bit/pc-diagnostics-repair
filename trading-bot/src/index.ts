@@ -26,6 +26,7 @@ import { createStrategy } from './strategies/registry.js';
 import { LiveExecutor, PaperExecutor, type Executor, type PaperState } from './trading/executor.js';
 import { PositionManager } from './trading/positions.js';
 import { PanelServer } from './server/panel.js';
+import { PriceStream } from './market/stream.js';
 import { RiskManager, type RiskState } from './trading/risk.js';
 import { fmtNum, fmtPct, fromRaw, SOL_MINT } from './utils.js';
 import { decryptSecret, encryptSecret, generateWallet, keypairToBase58, loadKeypair, type EncryptedKey } from './wallet.js';
@@ -203,10 +204,12 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
   });
   const strategy = createStrategy(cfg.strategy.name);
   const notifier = new Notifier(env.telegramToken, env.telegramChatId);
+  const stream = cfg.stream.enabled ? new PriceStream(ctx.rpc.connection, cfg.stream.maxSubscriptions) : undefined;
   bot = new TradingBot(cfg, env, {
     jup: ctx.jup, dex: ctx.dex, gecko: ctx.gecko, scanner: ctx.scanner, store: ctx.store, executor, risk,
-    positions: new PositionManager(cfg.risk, cfg.strategy.minSellScore), strategy, notifier, walletAddress: address,
+    positions: new PositionManager(cfg.risk, cfg.strategy.minSellScore, cfg.launch.exits), strategy, notifier, walletAddress: address, stream,
   });
+  if (cfg.launch.enabled) log.warn(`LAUNCH LANE ENABLED: sniping brand-new tokens with ${cfg.launch.sizeSol} SOL each, max ${cfg.launch.maxOpen} open / ${cfg.launch.maxPerHour} per hour. This is the highest-risk mode.`);
 
   if (env.mode === 'live') {
     log.warn('LIVE MODE: real transactions will be sent from ' + address);

@@ -21,6 +21,16 @@ interface DsPair {
   marketCap?: number;
   pairCreatedAt?: number;
   boosts?: { active?: number };
+  info?: { websites?: { url?: string }[]; socials?: { type?: string; url?: string }[] };
+}
+
+interface DsProfile {
+  url?: string;
+  chainId: string;
+  tokenAddress: string;
+  icon?: string;
+  description?: string;
+  links?: { type?: string; label?: string; url?: string }[];
 }
 
 interface DsBoost {
@@ -56,6 +66,9 @@ function toPair(p: DsPair): PairInfo {
     priceChange: { m5: n(p.priceChange?.m5), h1: n(p.priceChange?.h1), h6: n(p.priceChange?.h6), h24: n(p.priceChange?.h24) },
     txns: { m5: tx('m5'), h1: tx('h1'), h6: tx('h6'), h24: tx('h24') },
     boosted: (p.boosts?.active ?? 0) > 0,
+    boostsActive: p.boosts?.active ?? 0,
+    socials: p.info?.socials?.length ?? 0,
+    hasWebsite: (p.info?.websites?.length ?? 0) > 0,
   };
 }
 
@@ -90,6 +103,12 @@ export class DexScreenerClient {
       limiter: this.pairLimiter,
     });
     return (res.pairs ?? []).filter((p) => p.chainId === 'solana').map(toPair);
+  }
+
+  /** Newest token profiles on DexScreener (teams that just paid for a listing page): a fresh-launch feed. */
+  async getLatestSolanaProfiles(): Promise<string[]> {
+    const res = await fetchJson<DsProfile[]>(`${BASE}/token-profiles/latest/v1`, { limiter: this.profileLimiter }).catch(() => [] as DsProfile[]);
+    return [...new Set((res ?? []).filter((p) => p.chainId === 'solana' && p.tokenAddress).map((p) => p.tokenAddress))];
   }
 
   /** Token addresses currently boosted on DexScreener (paid promotion = attention, not quality). */

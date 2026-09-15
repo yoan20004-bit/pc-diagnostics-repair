@@ -130,6 +130,7 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
 
   <section class="view" id="v-market">
     <div class="card"><h3>Tracked tokens <span class="r" id="mktSum"></span></h3><div class="tbl" id="market"></div></div>
+    <div class="card"><h3>New launches <span class="r" id="launchSum"></span></h3><div class="tbl" id="launches"></div></div>
   </section>
 
   <section class="view" id="v-trades">
@@ -141,6 +142,7 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
     <div class="grid2">
       <div class="card"><h3>By strategy</h3><div class="tbl" id="anaStrategy"></div></div>
       <div class="card"><h3>By exit reason</h3><div class="tbl" id="anaExit"></div></div>
+      <div class="card"><h3>By lane</h3><div class="tbl" id="anaLane"></div></div>
       <div class="card"><h3>By token</h3><div class="tbl" id="anaToken"></div></div>
       <div class="card"><h3>By hour (UTC)</h3><div class="tbl" id="anaHour"></div></div>
       <div class="card"><h3>Execution quality <span class="r">quote vs fill</span></h3><div class="tbl" id="anaSlip"></div></div>
@@ -220,6 +222,19 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
         <div class="field"><label for="qHtf">Higher-timeframe filter</label><select id="qHtf"><option value="true">on</option><option value="false">off</option></select></div>
         <div class="field"><label for="qRegime">SOL regime filter</label><select id="qRegime"><option value="true">on</option><option value="false">off</option></select></div>
       </div>
+      <div class="row" style="margin-top:8px">
+        <div class="field"><label for="qLaunch">Launch sniping lane</label><select id="qLaunch"><option value="false">off</option><option value="true">on (high risk)</option></select></div>
+        <div class="field"><label for="qLaunchSize">Launch size (SOL)</label><input id="qLaunchSize" type="number" step="0.01"></div>
+        <div class="field"><label for="qLaunchOpen">Launch max open</label><input id="qLaunchOpen" type="number" step="1"></div>
+        <div class="field"><label for="qLaunchHour">Launch max / hour</label><input id="qLaunchHour" type="number" step="1"></div>
+        <div class="field"><label for="qLaunchStop">Launch stop %</label><input id="qLaunchStop" type="number" step="1"></div>
+        <div class="field"><label for="qLaunchScore">Launch min score</label><input id="qLaunchScore" type="number" step="0.05" min="0" max="1"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div class="field"><label for="qStream">WebSocket price stream</label><select id="qStream"><option value="true">on</option><option value="false">off</option></select></div>
+        <div class="field"><label for="qHolders">Deep holder analysis</label><select id="qHolders"><option value="true">on</option><option value="false">off</option></select></div>
+        <div class="field"><label for="qBundled">Max bundled wallets</label><input id="qBundled" type="number" step="1"></div>
+      </div>
       <div class="row" style="margin-top:12px"><button class="btn primary" id="btnQuick">Save quick settings</button></div>
     </div>
     <div class="card"><h3>Full configuration <span class="r" id="cfgPath"></span></h3>
@@ -296,14 +311,24 @@ function render(s) {
   $('#posSum').textContent = s.positions.length ? unreal >= 0 ? 'unrealised +' + unreal.toFixed(4) + ' SOL' : 'unrealised ' + unreal.toFixed(4) + ' SOL' : '';
   renderPositions(s.positions);
   renderMarket(s.tracked);
+  renderLaunches(s);
   renderEngine(s);
   renderChartSelect(s);
+}
+function renderLaunches(s) {
+  const L = s.launch || { enabled: false, candidates: [] };
+  const el = $('#launches');
+  $('#launchSum').textContent = L.enabled ? `${L.open} open · ${L.enteredLastHour} entered this hour · last scan ${ago(L.lastScan)}` : 'lane disabled';
+  if (!L.enabled) { el.innerHTML = '<div class="empty">The launch lane is off. Enable it under Settings to snipe brand-new tokens with a small, separate budget. Highest-risk mode: expect many small losses and occasional large wins.</div>'; return; }
+  if (!L.candidates.length) { el.innerHTML = '<div class="empty">No fresh tokens seen yet this scan.</div>'; return; }
+  el.innerHTML = `<table><thead><tr><th>Token</th><th class="num">Age</th><th>Score</th><th class="num">Liquidity</th><th class="num">5m vol</th><th class="num">Buys/Sells 5m</th><th class="num">5m</th><th class="num">Holders</th><th class="num">Top wallets</th><th class="num">Bundled</th><th class="num">Fresh</th><th>Verdict</th><th></th></tr></thead><tbody>` +
+    L.candidates.map((c) => `<tr><td><span class="sym">${esc(c.symbol)}</span> <a class="mono m" href="${esc(c.pair.url || 'https://dexscreener.com/solana/' + c.mint)}" target="_blank" rel="noopener">${short(c.mint)}</a><div class="m" style="font-size:11px">${esc(c.pair.dexId)}</div></td><td class="num">${Math.round(c.ageMinutes)}m</td><td><span class="bar ${c.score < 0.4 ? 'low' : ''}" style="margin-left:0"><i style="width:${Math.round(c.score * 100)}%"></i></span> <span class="mono m">${c.score.toFixed(2)}</span></td><td class="num">$${fmt(c.pair.liquidityUsd, 0)}</td><td class="num">$${fmt(c.pair.volume.m5, 0)}</td><td class="num">${c.pair.txns.m5.buys}/${c.pair.txns.m5.sells}</td><td class="num ${cls(c.pair.priceChange.m5)}">${pct(c.pair.priceChange.m5, 0)}</td><td class="num">${c.token && c.token.holderCount != null ? fmt(c.token.holderCount, 0) : '–'}</td><td class="num">${c.holders ? c.holders.topPctExPools.toFixed(0) + '%' : '–'}</td><td class="num ${c.holders && c.holders.bundled > 2 ? 'b' : ''}">${c.holders ? c.holders.bundled : '–'}</td><td class="num">${c.holders ? c.holders.freshWallets : '–'}</td><td class="reasons ${c.rejected ? 'b' : 'g'}">${esc(c.rejected || c.reasons.slice(0, 3).join(' · '))}</td><td>${c.rejected ? '' : `<button class="btn small" data-buy="${c.mint}">Buy</button>`}</td></tr>`).join('') + '</tbody></table>';
 }
 function renderPositions(ps) {
   const el = $('#positions');
   if (!ps.length) { el.innerHTML = '<div class="empty">No open positions. ' + (S.running ? 'Waiting for a signal that clears the buy threshold.' : 'Start the bot to begin.') + '</div>'; return; }
   el.innerHTML = `<table><thead><tr><th>Token</th><th class="num">Gain</th><th class="num">Price</th><th class="num">Value</th><th class="num">Cost</th><th class="num">Unrealised</th><th class="num">High</th><th class="num">Stop</th><th>TP</th><th class="num">Age</th><th></th></tr></thead><tbody>` +
-    ps.map((p) => `<tr><td><span class="sym">${esc(p.symbol)}</span> <span class="mono m">${short(p.mint)}</span><div class="m" style="font-size:11px">${esc(p.strategy)}</div></td>
+    ps.map((p) => `<tr><td><span class="sym">${esc(p.symbol)}</span>${p.lane === 'launch' ? ' <span class="pill hold" style="color:var(--warn)">launch</span>' : ''} <span class="mono m">${short(p.mint)}</span><div class="m" style="font-size:11px">${esc(p.strategy)}</div></td>
       <td class="num ${cls(p.gainPct)}"><b>${pct(p.gainPct)}</b></td><td class="num mono">$${fmt(p.priceUsd, 6)}</td><td class="num mono">${fmt(p.valueSol)}</td><td class="num mono">${p.costSol.toFixed(4)}</td>
       <td class="num mono ${cls(p.unrealisedSol)}">${sol(p.unrealisedSol)}</td><td class="num mono">${pct(p.hwmPct)}</td><td class="num mono ${p.stopLevelPct > 0 ? 'g' : 'b'}" title="${p.stopLevelPct > 0 ? 'profit locked' : 'ATR-scaled stop'}">${pct(p.stopLevelPct, 1)}</td><td>${p.ladderDone}/${p.ladderTotal}</td><td class="num">${p.ageMin}m</td>
       <td><button class="btn small" data-close="${p.mint}" data-pct="50">Sell 50%</button> <button class="btn small danger" data-close="${p.mint}" data-pct="100">Close</button></td></tr>`).join('') + '</tbody></table>';
@@ -334,6 +359,8 @@ function renderEngine(s) {
     ['Volatility', c.risk.volatility.enabled ? 'stop = ' + c.risk.volatility.stopAtrMultiple + ' × ATR (' + c.risk.volatility.minStopPct + '–' + c.risk.volatility.maxStopPct + '%), risk ' + c.risk.volatility.riskPerTradePct + '% per trade, lock ' + Math.round(c.risk.lockProfitFraction * 100) + '% of banked gains' : 'fixed stop ' + c.risk.stopLossPct + '%'],
     ['Filters', (c.strategy.htf.enabled ? c.strategy.htf.multiplier + '× higher-timeframe trend' : 'no HTF filter') + ' · ' + (c.regime.enabled ? 'SOL regime' : 'no regime filter') + ' · sell-path ≤ ' + c.risk.maxRoundTripLossPct + '% loss'],
     ['Execution quality', s.slippage && s.slippage.fills ? 'avg shortfall ' + s.slippage.overallPct.toFixed(2) + '% over ' + s.slippage.fills + ' fills' : 'no fills yet'],
+    ['Price stream', s.stream && s.stream.enabled ? (s.stream.watching ? s.stream.watching + ' pools streaming · ' + s.stream.ticksPerMin + ' ticks/min' : 'on, no streamable pools yet (polling)') : 'off (polling only)'],
+    ['Launch lane', c.launch.enabled ? c.launch.sizeSol + ' SOL each · max ' + c.launch.maxOpen + ' open, ' + c.launch.maxPerHour + '/h · stop ' + c.launch.exits.stopLossPct + '% · hold ≤ ' + c.launch.exits.maxHoldMinutes + 'm' : 'off'],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
 }
 
@@ -372,13 +399,16 @@ async function loadConfig() {
     $('#qStrategy').value = c.strategy.name; $('#qMinBuy').value = c.strategy.minBuyScore; $('#qSize').value = c.risk.positionSizeSol; $('#qSizePct').value = c.risk.positionSizePct; $('#qMaxPos').value = c.risk.maxOpenPositions; $('#qExp').value = c.risk.maxExposureSol;
     $('#qStop').value = c.risk.stopLossPct; $('#qTrailAct').value = c.risk.trailingStop.activationPct; $('#qTrail').value = c.risk.trailingStop.trailPct; $('#qHold').value = c.risk.maxHoldMinutes; $('#qDaily').value = c.risk.maxDailyLossPct; $('#qTrades').value = c.risk.maxTradesPerDay;
     $('#qVol').value = String(c.risk.volatility.enabled); $('#qAtrMult').value = c.risk.volatility.stopAtrMultiple; $('#qRiskPct').value = c.risk.volatility.riskPerTradePct; $('#qLock').value = c.risk.lockProfitFraction; $('#qHtf').value = String(c.strategy.htf.enabled); $('#qRegime').value = String(c.regime.enabled);
+    $('#qLaunch').value = String(c.launch.enabled); $('#qLaunchSize').value = c.launch.sizeSol; $('#qLaunchOpen').value = c.launch.maxOpen; $('#qLaunchHour').value = c.launch.maxPerHour; $('#qLaunchStop').value = c.launch.exits.stopLossPct; $('#qLaunchScore').value = c.launch.minScore;
+    $('#qStream').value = String(c.stream.enabled); $('#qHolders').value = String(c.holders.enabled); $('#qBundled').value = c.holders.maxBundledHolders;
     $('#qScan').value = String(c.scanner.enabled); $('#qLiq').value = c.scanner.filters.minLiquidityUsd; $('#qHold2').value = c.scanner.filters.minHolders; $('#qOrg').value = c.scanner.filters.minOrganicScore; $('#qAge').value = c.scanner.filters.minAgeHours; $('#qCand').value = c.scanner.maxCandidates;
   } catch (e) { toast(e.message, 'bad'); }
 }
 $('#btnCfgReload').onclick = loadConfig;
 $('#btnCfg').onclick = () => act(() => api('config', { method: 'PUT', body: JSON.stringify({ yaml: $('#cfgYaml').value }) }).then((r) => { if (r.restartNeeded) toast('Saved. Candle timeframe changed: restart the bot to apply it.', 'good'); loadConfig(); return r; }), 'Configuration saved and applied');
 $('#btnQuick').onclick = () => { const n = (id) => Number($(id).value);
-  const patch = { strategy: { name: $('#qStrategy').value, minBuyScore: n('#qMinBuy'), htf: { enabled: $('#qHtf').value === 'true' } }, regime: { enabled: $('#qRegime').value === 'true' }, risk: { positionSizeSol: n('#qSize'), positionSizePct: n('#qSizePct'), maxOpenPositions: n('#qMaxPos'), maxExposureSol: n('#qExp'), stopLossPct: n('#qStop'), trailingStop: { activationPct: n('#qTrailAct'), trailPct: n('#qTrail') }, maxHoldMinutes: n('#qHold'), maxDailyLossPct: n('#qDaily'), maxTradesPerDay: n('#qTrades'), volatility: { enabled: $('#qVol').value === 'true', stopAtrMultiple: n('#qAtrMult'), riskPerTradePct: n('#qRiskPct') }, lockProfitFraction: n('#qLock') }, scanner: { enabled: $('#qScan').value === 'true', maxCandidates: n('#qCand'), filters: { minLiquidityUsd: n('#qLiq'), minHolders: n('#qHold2'), minOrganicScore: n('#qOrg'), minAgeHours: n('#qAge') } } };
+  if ($('#qLaunch').value === 'true' && !confirm('Enable the launch sniping lane? It buys tokens that are minutes old with ' + $('#qLaunchSize').value + ' SOL each. Expect frequent losses.')) return;
+  const patch = { strategy: { name: $('#qStrategy').value, minBuyScore: n('#qMinBuy'), htf: { enabled: $('#qHtf').value === 'true' } }, regime: { enabled: $('#qRegime').value === 'true' }, launch: { enabled: $('#qLaunch').value === 'true', sizeSol: n('#qLaunchSize'), maxOpen: n('#qLaunchOpen'), maxPerHour: n('#qLaunchHour'), minScore: n('#qLaunchScore'), exits: { stopLossPct: n('#qLaunchStop') } }, stream: { enabled: $('#qStream').value === 'true' }, holders: { enabled: $('#qHolders').value === 'true', maxBundledHolders: n('#qBundled') }, risk: { positionSizeSol: n('#qSize'), positionSizePct: n('#qSizePct'), maxOpenPositions: n('#qMaxPos'), maxExposureSol: n('#qExp'), stopLossPct: n('#qStop'), trailingStop: { activationPct: n('#qTrailAct'), trailPct: n('#qTrail') }, maxHoldMinutes: n('#qHold'), maxDailyLossPct: n('#qDaily'), maxTradesPerDay: n('#qTrades'), volatility: { enabled: $('#qVol').value === 'true', stopAtrMultiple: n('#qAtrMult'), riskPerTradePct: n('#qRiskPct') }, lockProfitFraction: n('#qLock') }, scanner: { enabled: $('#qScan').value === 'true', maxCandidates: n('#qCand'), filters: { minLiquidityUsd: n('#qLiq'), minHolders: n('#qHold2'), minOrganicScore: n('#qOrg'), minAgeHours: n('#qAge') } } };
   act(() => api('config', { method: 'PUT', body: JSON.stringify({ patch }) }).then((r) => { loadConfig(); return r; }), 'Settings saved and applied'); };
 
 /* ---------------- trades & equity ---------------- */
@@ -467,7 +497,7 @@ async function loadAnalytics() {
   try {
     const a = await api('analytics');
     const tbl = (rows, label) => rows.length ? `<table><thead><tr><th>${label}</th><th class="num">Exits</th><th class="num">Win %</th><th class="num">PnL SOL</th><th class="num">Avg %</th></tr></thead><tbody>` + rows.map((r) => `<tr><td>${esc(r.key)}</td><td class="num">${r.trades}</td><td class="num">${r.trades ? Math.round((r.wins / r.trades) * 100) : 0}%</td><td class="num mono ${cls(r.pnlSol)}">${sol(r.pnlSol)}</td><td class="num ${cls(r.avgPnlPct)}">${pct(r.avgPnlPct)}</td></tr>`).join('') + '</tbody></table>' : '<div class="empty">No exits yet.</div>';
-    $('#anaStrategy').innerHTML = tbl(a.byStrategy, 'Strategy'); $('#anaExit').innerHTML = tbl(a.byExitKind, 'Exit'); $('#anaToken').innerHTML = tbl(a.byToken, 'Token'); $('#anaHour').innerHTML = tbl(a.byHour, 'Hour');
+    $('#anaStrategy').innerHTML = tbl(a.byStrategy, 'Strategy'); $('#anaExit').innerHTML = tbl(a.byExitKind, 'Exit'); $('#anaLane').innerHTML = tbl(a.byLane || [], 'Lane'); $('#anaToken').innerHTML = tbl(a.byToken, 'Token'); $('#anaHour').innerHTML = tbl(a.byHour, 'Hour');
     const all = a.byStrategy.reduce((o, r) => ({ trades: o.trades + r.trades, wins: o.wins + r.wins, pnl: o.pnl + r.pnlSol }), { trades: 0, wins: 0, pnl: 0 });
     const best = a.byToken[0]; const worst = a.byToken[a.byToken.length - 1];
     $('#anaKpis').innerHTML = [['Exits', all.trades, ''], ['Win rate', all.trades ? Math.round((all.wins / all.trades) * 100) + '%' : '–', all.wins + ' winners'], ['Realised', sol(all.pnl) + ' SOL', ''], ['Best token', best ? best.key : '–', best ? sol(best.pnlSol) + ' SOL' : ''], ['Worst token', worst ? worst.key : '–', worst ? sol(worst.pnlSol) + ' SOL' : ''], ['Avg shortfall', a.slippage.fills ? a.slippage.overallPct.toFixed(2) + '%' : '–', a.slippage.fills + ' fills measured']].map(([l, v, s2]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s2}</div></div>`).join('');

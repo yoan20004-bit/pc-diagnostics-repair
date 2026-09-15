@@ -66,6 +66,9 @@ export interface PairInfo {
     h24: { buys: number; sells: number };
   };
   boosted?: boolean;
+  boostsActive?: number;
+  socials?: number;
+  hasWebsite?: boolean;
 }
 
 export type SignalAction = 'buy' | 'sell' | 'hold';
@@ -103,6 +106,8 @@ export interface Position {
   closeReason?: string;
   /** stop distance in % chosen at entry (ATR-scaled); falls back to risk.stopLossPct */
   stopPct?: number;
+  /** which rule set manages the exit */
+  lane?: 'core' | 'launch';
 }
 
 export interface Trade {
@@ -147,6 +152,34 @@ export interface RegimeStatus {
   solEma?: number;
   solChange1hPct?: number;
   checkedAt: number;
+}
+
+export interface HolderQuality {
+  /** share of supply held by the top wallets, pools and program accounts excluded */
+  topPctExPools: number;
+  largestWalletPct: number;
+  poolAccounts: number;
+  /** wallets in the top list holding near-identical amounts (bundle signature) */
+  bundled: number;
+  /** top wallets with almost no SOL (throwaway / airdrop-farm wallets) */
+  freshWallets: number;
+  walletsAnalysed: number;
+}
+
+export interface LaunchCandidate {
+  mint: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  ageMinutes: number;
+  score: number;
+  reasons: string[];
+  pair: PairInfo;
+  token?: TokenMeta;
+  holders?: HolderQuality;
+  safetyScore: number;
+  rejected?: string;
+  discoveredAt: number;
 }
 
 export interface Candidate {

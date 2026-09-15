@@ -3,9 +3,11 @@ import { createLogger } from '../logger.js';
 import { bestPair, type DexScreenerClient } from '../market/dexscreener.js';
 import { toTokenMeta, type JupiterClient, type JupTokenV2 } from '../market/jupiter.js';
 import type { SolanaRpc } from '../rpc.js';
-import type { Candidate, TokenMeta } from '../types.js';
+import type { Candidate, LaunchCandidate, TokenMeta } from '../types.js';
 import { SOL_MINT, USDC_MINT, shortMint } from '../utils.js';
+import { analyzeHolders } from './holders.js';
 import { assessSafety } from './safety.js';
+import { scoreLaunch } from '../strategies/launch.js';
 
 const log = createLogger('scanner');
 
@@ -118,14 +120,16 @@ export class TokenScanner {
     for (const t of top) {
       let mintInfo;
       let holderShare;
+      let holderQuality;
       try {
         mintInfo = await this.rpc.getMintInfo(t.mint);
-        holderShare = await this.rpc.getTopHolderShare(t.mint, mintInfo.supplyRaw, 10);
+        if (this.cfg.holders.enabled) holderQuality = await analyzeHolders(this.rpc.connection, t.mint, mintInfo.supplyRaw, this.cfg.holders);
+        else holderShare = await this.rpc.getTopHolderShare(t.mint, mintInfo.supplyRaw, 10);
       } catch (e) {
         log.debug(`${t.meta.symbol}: on-chain check failed (${(e as Error).message})`);
       }
       const pair = pairs.get(t.mint);
-      const safety = assessSafety({ mint: t.mint, token: t.meta, pair, mintInfo, holderShare, shieldWarnings: shield[t.mint] }, f);
+      const safety = assessSafety({ mint: t.mint, token: t.meta, pair, mintInfo, holderShare, holderQuality, holderLimits: this.cfg.holders, shieldWarnings: shield[t.mint] }, f);
       if (!safety.ok) {
         log.debug(`${t.meta.symbol} rejected (${safety.score}): ${[...safety.hardFail, ...safety.reasons].join('; ')}`);
         continue;
@@ -143,8 +147,84 @@ export class TokenScanner {
         discoveredAt: Date.now(),
       });
     }
-    out.sort((a, b) => b.safetyScore + rank(b.token) - (a.safetyScore + rank(a.token)));
+    out.sort((a, b) => b.safetyScore + rank(b.token) + attention(b.pair, b.token) - (a.safetyScore + rank(a.token) + attention(a.pair, a.token)));
     return out.slice(0, sc.maxCandidates);
+  }
+
+  /** Brand-new tokens for the launch lane. Cheap feeds first, then pair data, then on-chain holder analysis. */
+  async discoverLaunches(excludeMints: Set<string> = new Set()): Promise<LaunchCandidate[]> {
+    const lc = this.cfg.launch;
+    const found = new Map<string, JupTokenV2 | undefined>();
+    const tasks: Promise<void>[] = [];
+    if (lc.sources.includes('jupiter_recent')) tasks.push(this.jup.getRecentTokens().then((l) => l.forEach((t) => found.set(t.id, t))).catch((e) => log.debug('jupiter recent failed:', (e as Error).message)));
+    if (lc.sources.includes('jupiter_trending_5m')) tasks.push(this.jup.getCategory('toptrending', '5m', 50).then((l) => l.forEach((t) => found.set(t.id, t))).catch((e) => log.debug('jupiter 5m trending failed:', (e as Error).message)));
+    if (lc.sources.includes('dexscreener_profiles')) tasks.push(this.dex.getLatestSolanaProfiles().then((l) => l.forEach((m) => { if (!found.has(m)) found.set(m, undefined); })).catch(() => undefined));
+    await Promise.all(tasks);
+    for (const m of [...found.keys()]) if (STABLE_OR_BASE.has(m) || excludeMints.has(m) || this.cfg.blacklist.includes(m)) found.delete(m);
+    if (!found.size) return [];
+
+    // fill missing metadata for profile-only finds
+    const missing = [...found.entries()].filter(([, t]) => !t).map(([m]) => m);
+    if (missing.length) for (const t of await this.jup.getTokens(missing.slice(0, 100)).catch(() => [])) found.set(t.id, t);
+
+    // age pre-filter from Jupiter firstPool, then pairs for the rest
+    const now = Date.now();
+    const pre = [...found.entries()].filter(([, t]) => {
+      const created = t?.firstPool?.createdAt ? Date.parse(t.firstPool.createdAt) : undefined;
+      if (created === undefined) return true; // unknown age: let the pair decide
+      const age = (now - created) / 60_000;
+      return age >= lc.minAgeMinutes && age <= lc.maxAgeMinutes * 1.5;
+    });
+    const mints = pre.map(([m]) => m).slice(0, 60);
+    if (!mints.length) return [];
+    const [pairs, shield] = await Promise.all([
+      this.dex.getBestPairs(mints).catch(() => new Map()),
+      this.jup.shield(mints).catch(() => ({}) as Record<string, { type: string }[]>),
+    ]);
+    const out: LaunchCandidate[] = [];
+    for (const m of mints) {
+      const pair = pairs.get(m);
+      if (!pair) continue;
+      const t = found.get(m);
+      const meta = t ? toTokenMeta(t) : undefined;
+      const created = pair.pairCreatedAt ?? (t?.firstPool?.createdAt ? Date.parse(t.firstPool.createdAt) : undefined);
+      const ageMinutes = created ? (now - created) / 60_000 : lc.maxAgeMinutes + 1;
+      // cheap rejections before spending RPC calls
+      const cheap = scoreLaunch({ pair, token: meta, ageMinutes }, lc);
+      if (cheap.rejected) {
+        log.debug(`launch ${pair.baseToken.symbol}: ${cheap.rejected}`);
+        continue;
+      }
+      let mintInfo;
+      let holders;
+      try {
+        mintInfo = await this.rpc.getMintInfo(m);
+        holders = await analyzeHolders(this.rpc.connection, m, mintInfo.supplyRaw, this.cfg.holders);
+      } catch (e) {
+        log.debug(`launch ${pair.baseToken.symbol}: on-chain check failed (${(e as Error).message})`);
+        continue;
+      }
+      const rejectTypes = new Set(this.cfg.scanner.filters.rejectShieldWarnings.map((x) => x.toUpperCase()));
+      const shieldReject = (shield[m] ?? []).map((w) => (w.type || '').toUpperCase()).find((x) => rejectTypes.has(x));
+      const sc = scoreLaunch({ pair, token: meta, holders, ageMinutes, mintAuthorityOn: mintInfo.mintAuthority !== null, freezeAuthorityOn: mintInfo.freezeAuthority !== null, shieldReject }, lc);
+      out.push({
+        mint: m,
+        symbol: pair.baseToken.symbol,
+        name: pair.baseToken.name,
+        decimals: meta?.decimals ?? mintInfo.decimals,
+        ageMinutes,
+        score: sc.score,
+        reasons: sc.reasons,
+        rejected: sc.rejected ?? (sc.ok ? undefined : `score ${sc.score.toFixed(2)} < ${lc.minScore}`),
+        pair,
+        token: meta,
+        holders,
+        safetyScore: Math.round(sc.score * 100),
+        discoveredAt: now,
+      });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out;
   }
 
   /** Full deep check for a single mint (used by `check` command and watchlist refresh). */
@@ -181,6 +261,20 @@ export class TokenScanner {
       : undefined;
     return { candidate, safety, meta, pair };
   }
+}
+
+/** Attention signals: paid boosts, socials, trader growth. Small nudge on top of quality. */
+function attention(pair?: import('../types.js').PairInfo, meta?: TokenMeta): number {
+  let a = 0;
+  if (pair?.boostsActive) a += Math.min(10, pair.boostsActive);
+  if (pair?.socials) a += Math.min(6, pair.socials * 2);
+  if (pair?.hasWebsite) a += 2;
+  const t1 = meta?.stats?.['1h']?.numTraders ?? 0;
+  const t6 = meta?.stats?.['6h']?.numTraders ?? 0;
+  if (t1 && t6) a += Math.max(-5, Math.min(10, (t1 / (t6 / 6) - 1) * 5)); // traders per hour vs the 6h average
+  const hc = meta?.stats?.['1h']?.holderChange ?? 0;
+  a += Math.max(-5, Math.min(5, hc));
+  return a;
 }
 
 function rank(meta?: TokenMeta): number {

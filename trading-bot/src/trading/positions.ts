@@ -1,5 +1,14 @@
-import type { RiskConfig } from '../config.js';
+import type { BotConfig, RiskConfig } from '../config.js';
 import type { Position, Signal } from '../types.js';
+
+/** The subset of exit rules a lane needs. */
+export interface ExitProfile {
+  stopLossPct: number;
+  takeProfitLadder: { gainPct: number; sellPct: number }[];
+  trailingStop: { enabled: boolean; activationPct: number; trailPct: number };
+  maxHoldMinutes: number;
+  lockProfitFraction: number;
+}
 
 export interface ExitDecision {
   reason: string;
@@ -13,11 +22,22 @@ export interface ExitDecision {
  * hard stop -> trailing stop -> take-profit ladder -> max hold time -> strategy sell signal.
  */
 export class PositionManager {
-  constructor(private cfg: RiskConfig, private minSellScore: number) {}
+  private launch?: ExitProfile;
 
-  setConfig(cfg: RiskConfig, minSellScore: number) {
+  constructor(private cfg: RiskConfig, private minSellScore: number, launch?: BotConfig['launch']['exits']) {
+    this.launch = launch;
+  }
+
+  setConfig(cfg: RiskConfig, minSellScore: number, launch?: BotConfig['launch']['exits']) {
     this.cfg = cfg;
     this.minSellScore = minSellScore;
+    this.launch = launch;
+  }
+
+  /** Exit rules that apply to this position (core risk config or the launch lane profile). */
+  profile(p: Position): ExitProfile {
+    if (p.lane === 'launch' && this.launch) return this.launch;
+    return this.cfg;
   }
 
   /** Update the high-water mark; returns true if it changed. */
@@ -31,11 +51,12 @@ export class PositionManager {
 
   /** Current stop as a gain % relative to entry (negative = below entry). */
   stopLevelPct(p: Position): number {
+    const pr = this.profile(p);
     if (p.ladderDone > 0) {
-      const rung = this.cfg.takeProfitLadder[Math.min(p.ladderDone, this.cfg.takeProfitLadder.length) - 1];
-      return rung ? rung.gainPct * this.cfg.lockProfitFraction : 0;
+      const rung = pr.takeProfitLadder[Math.min(p.ladderDone, pr.takeProfitLadder.length) - 1];
+      return rung ? rung.gainPct * pr.lockProfitFraction : 0;
     }
-    return -(p.stopPct ?? this.cfg.stopLossPct);
+    return -(p.stopPct ?? pr.stopLossPct);
   }
 
   gainPct(p: Position, priceSol: number): number {
@@ -45,17 +66,18 @@ export class PositionManager {
   checkExit(p: Position, priceSol: number, signal?: Signal, now = Date.now()): ExitDecision | undefined {
     this.track(p, priceSol);
     const gain = this.gainPct(p, priceSol);
-    const ladder = this.cfg.takeProfitLadder;
+    const pr = this.profile(p);
+    const ladder = pr.takeProfitLadder;
 
     // 1. hard stop-loss (ATR-scaled per position); after a TP rung it becomes a profit-lock stop
     const stopLevel = this.stopLevelPct(p);
     if (gain <= stopLevel) {
-      const label = p.ladderDone > 0 ? (stopLevel > 0 ? `profit-lock stop at +${stopLevel.toFixed(1)}%` : 'breakeven stop') : `stop-loss (${(p.stopPct ?? this.cfg.stopLossPct).toFixed(1)}%)`;
+      const label = p.ladderDone > 0 ? (stopLevel > 0 ? `profit-lock stop at +${stopLevel.toFixed(1)}%` : 'breakeven stop') : `stop-loss (${(p.stopPct ?? pr.stopLossPct).toFixed(1)}%)`;
       return { reason: `${label} hit (${gain.toFixed(2)}%)`, sellPct: 100, kind: 'stop' };
     }
 
     // 2. trailing stop
-    const ts = this.cfg.trailingStop;
+    const ts = pr.trailingStop;
     if (ts.enabled && p.entryPriceSol > 0) {
       const hwmGain = ((p.highWaterMarkSol - p.entryPriceSol) / p.entryPriceSol) * 100;
       if (hwmGain >= ts.activationPct) {
@@ -75,8 +97,8 @@ export class PositionManager {
     }
 
     // 4. time stop
-    if (now - p.openedAt >= this.cfg.maxHoldMinutes * 60_000) {
-      return { reason: `max hold time ${this.cfg.maxHoldMinutes}m reached (${gain.toFixed(2)}%)`, sellPct: 100, kind: 'time' };
+    if (now - p.openedAt >= pr.maxHoldMinutes * 60_000) {
+      return { reason: `max hold time ${pr.maxHoldMinutes}m reached (${gain.toFixed(2)}%)`, sellPct: 100, kind: 'time' };
     }
 
     // 5. strategy exit

@@ -16,7 +16,8 @@ import type { ExitDecision } from './trading/positions.js';
 import type { Executor } from './trading/executor.js';
 import type { PositionManager } from './trading/positions.js';
 import type { RiskManager } from './trading/risk.js';
-import type { Candidate, PairInfo, Position, RegimeStatus, Signal } from './types.js';
+import type { Candidate, LaunchCandidate, PairInfo, Position, RegimeStatus, Signal } from './types.js';
+import type { PriceStream, StreamTick } from './market/stream.js';
 import { SOL_MINT, fmtNum, fmtPct, fromRaw, shortMint, sleep, uid } from './utils.js';
 
 const log = createLogger('bot');
@@ -33,6 +34,8 @@ export interface BotDeps {
   strategy: Strategy; // replaced on config reload
   notifier: Notifier;
   walletAddress: string;
+  /** optional WebSocket price stream (sub-second ticks for held/tracked tokens) */
+  stream?: PriceStream;
 }
 
 export interface TrackedView {
@@ -94,6 +97,8 @@ export interface BotSnapshot {
   slippage: ReturnType<BotDeps['store']['slippageStats']>;
   autoBlacklist: string[];
   feedAgeSec: number;
+  launch: { enabled: boolean; candidates: LaunchCandidate[]; open: number; lastScan: number; enteredLastHour: number };
+  stream: { enabled: boolean; watching: number; ticksPerMin: number };
 }
 
 export class TradingBot extends EventEmitter {
@@ -122,6 +127,11 @@ export class TradingBot extends EventEmitter {
   private staleAlerted = false;
   private solSeeded = false;
   private fastTimer: NodeJS.Timeout | undefined;
+  private launchCandidates: LaunchCandidate[] = [];
+  private lastLaunchScan = 0;
+  private launchEntries: number[] = []; // timestamps of launch-lane entries (rate limit)
+  private streamTicks: number[] = [];
+  private streamExitPending = false;
 
   constructor(private cfg: BotConfig, private env: EnvConfig, private d: BotDeps) {
     super();
@@ -129,6 +139,46 @@ export class TradingBot extends EventEmitter {
     this.strategy = withFilters(d.strategy, cfg);
     this.autoBlacklist = new Set(d.store.getJson<string[]>('autoBlacklist') ?? []);
     for (const p of this.d.store.openPositions()) this.open.set(p.mint, p);
+    d.stream?.on('price', (t: StreamTick) => this.onStreamTick(t));
+  }
+
+  /* ------------------------------------------------------------ streaming */
+  private onStreamTick(t: StreamTick) {
+    const quoteUsd = t.quoteMint === SOL_MINT ? this.solUsd : 1; // SOL or a USD stable quote
+    if (!quoteUsd) return;
+    const usd = t.priceQuote * quoteUsd;
+    this.candles.addTick(t.mint, usd, t.ts);
+    this.lastPriceOk = t.ts;
+    this.streamTicks.push(t.ts);
+    if (this.streamTicks.length > 500) this.streamTicks.splice(0, this.streamTicks.length - 500);
+    // held token moved: check exits promptly (coalesced to one check per second)
+    if (this.open.has(t.mint) && this.running && !this.streamExitPending) {
+      this.streamExitPending = true;
+      setTimeout(() => {
+        this.streamExitPending = false;
+        void this.withLock(() => this.manageExits()).catch((e) => log.debug('stream exit check:', (e as Error).message));
+      }, 1000);
+    }
+  }
+
+  private async syncStream() {
+    const st = this.d.stream;
+    if (!st || !this.cfg.stream.enabled) return;
+    const want = [...new Set([...this.open.keys(), ...this.tracked.keys()])].slice(0, this.cfg.stream.maxSubscriptions);
+    for (const m of st.watching) if (!want.includes(m)) await st.unwatch(m);
+    for (const m of want) {
+      if (st.has(m)) continue;
+      const pair = this.pairs.get(m) ?? this.tracked.get(m)?.pair;
+      const dec = this.decimalsOf(m);
+      if (!pair || dec === undefined) continue;
+      const quoteDec = pair.quoteToken.address === SOL_MINT ? 9 : 6;
+      if (pair.quoteToken.address !== SOL_MINT && !/USD/i.test(pair.quoteToken.symbol)) continue; // only SOL/USD-quoted pools
+      try {
+        await st.watch(m, pair, dec, quoteDec);
+      } catch (e) {
+        log.debug(`stream watch ${this.tracked.get(m)?.symbol ?? m}: ${(e as Error).message}`);
+      }
+    }
   }
 
   get regimeStatus() {
@@ -196,7 +246,7 @@ export class TradingBot extends EventEmitter {
   updateConfig(next: BotConfig) {
     this.cfg = next;
     this.d.risk.setConfig(next.risk);
-    this.d.positions.setConfig(next.risk, next.strategy.minSellScore);
+    this.d.positions.setConfig(next.risk, next.strategy.minSellScore, next.launch.exits);
     this.d.scanner.setConfig(next);
     if (this.d.strategy.name !== next.strategy.name) this.d.strategy = createStrategy(next.strategy.name);
     this.strategy = withFilters(this.d.strategy, next);
@@ -318,6 +368,18 @@ export class TradingBot extends EventEmitter {
       slippage: this.d.store.slippageStats(),
       autoBlacklist: [...this.autoBlacklist],
       feedAgeSec: Math.round((now - this.lastPriceOk) / 1000),
+      launch: {
+        enabled: this.cfg.launch.enabled,
+        candidates: this.launchCandidates.slice(0, 20),
+        open: [...this.open.values()].filter((p) => p.lane === 'launch').length,
+        lastScan: this.lastLaunchScan,
+        enteredLastHour: this.launchEntries.filter((t) => now - t < 3_600_000).length,
+      },
+      stream: {
+        enabled: Boolean(this.d.stream) && this.cfg.stream.enabled,
+        watching: this.d.stream?.watching.length ?? 0,
+        ticksPerMin: this.streamTicks.filter((t) => now - t < 60_000).length,
+      },
     };
   }
 
@@ -383,6 +445,7 @@ export class TradingBot extends EventEmitter {
     }
     log.info('bot loop stopped');
     if (this.fastTimer) clearInterval(this.fastTimer);
+    await this.d.stream?.close().catch(() => undefined);
     this.fastTimer = undefined;
     this.emit('state');
   }
@@ -438,7 +501,51 @@ export class TradingBot extends EventEmitter {
     }
     await this.manageExits();
     await this.manageEntries();
+    if (this.cfg.launch.enabled && now - this.lastLaunchScan >= this.cfg.launch.scanIntervalSec * 1000) await this.manageLaunchLane();
+    await this.syncStream();
     if (this.tickNo % 4 === 1) await this.logStatus();
+  }
+
+  /* ------------------------------------------------------------ launch lane */
+  private async manageLaunchLane() {
+    this.lastLaunchScan = Date.now();
+    const lc = this.cfg.launch;
+    try {
+      this.launchCandidates = await this.d.scanner.discoverLaunches(new Set([...this.open.keys(), ...this.autoBlacklist]));
+    } catch (e) {
+      log.warn('launch scan failed:', (e as Error).message);
+      return;
+    }
+    const ok = this.launchCandidates.filter((c) => !c.rejected);
+    log.info(`launch lane: ${this.launchCandidates.length} fresh tokens checked, ${ok.length} pass (${ok.map((c) => `${c.symbol} ${c.score.toFixed(2)}`).join(', ') || 'none'})`);
+    if (this.paused || !this.regime.ok) return;
+    const openLaunch = [...this.open.values()].filter((p) => p.lane === 'launch').length;
+    const now = Date.now();
+    this.launchEntries = this.launchEntries.filter((t) => now - t < 3_600_000);
+    let slots = Math.min(lc.maxOpen - openLaunch, lc.maxPerHour - this.launchEntries.length);
+    if (slots <= 0) return;
+    const balance = await this.d.executor.solBalance();
+    for (const c of ok) {
+      if (slots <= 0) break;
+      const check = this.d.risk.canOpen({ openPositions: this.open.size, exposureSol: [...this.open.values()].reduce((a, p) => a + p.costSol, 0), balanceSol: balance, mint: c.mint });
+      if (!check.ok) {
+        log.info(`launch skip ${c.symbol}: ${check.reason}`);
+        if (!check.reason?.startsWith('re-entry')) break;
+        continue;
+      }
+      const size = Math.min(lc.sizeSol, Math.max(0, balance - this.cfg.risk.minSolReserve));
+      if (size < 0.005) break;
+      const cand: Candidate = { mint: c.mint, symbol: c.symbol, name: c.name, decimals: c.decimals, source: ['launch'], token: c.token, pair: c.pair, safetyScore: c.safetyScore, safetyReasons: c.reasons, discoveredAt: c.discoveredAt };
+      this.tracked.set(c.mint, cand);
+      this.pairs.set(c.mint, c.pair);
+      if (c.pair.priceUsd) this.candles.addTick(c.mint, c.pair.priceUsd, now);
+      const sig: Signal = { action: 'buy', score: c.score, reasons: c.reasons, strategy: 'launch' };
+      const spent = await this.enter(cand, sig, size, lc.exits.stopLossPct, 'launch');
+      if (spent > 0) {
+        slots--;
+        this.launchEntries.push(Date.now());
+      }
+    }
   }
 
   /** Scan immediately (panel button). Safe to call while the loop is stopped. */
@@ -676,12 +783,14 @@ export class TradingBot extends EventEmitter {
     }
   }
 
-  private async enter(c: Candidate, sig: Signal, sizeSol: number, stopPct?: number): Promise<number> {
+  private async enter(c: Candidate, sig: Signal, sizeSol: number, stopPct?: number, lane: 'core' | 'launch' = 'core'): Promise<number> {
     const stop = stopPct ?? this.d.risk.stopPctFor(atrPct(this.candles.get(c.mint), this.cfg.risk.volatility.atrPeriod));
-    log.info(`BUY signal ${c.symbol} score=${sig.score.toFixed(2)} size=${sizeSol} SOL stop=${stop.toFixed(1)}% :: ${sig.reasons.slice(0, 4).join('; ')}`);
+    log.info(`BUY ${lane === 'launch' ? 'launch' : 'signal'} ${c.symbol} score=${sig.score.toFixed(2)} size=${sizeSol} SOL stop=${stop.toFixed(1)}% :: ${sig.reasons.slice(0, 4).join('; ')}`);
     try {
       const preview = await this.d.executor.previewBuy(c.mint, sizeSol);
-      const q = this.d.risk.checkQuote(preview);
+      const q = lane === 'launch' && preview.roundTripLossPct !== undefined && preview.roundTripLossPct > this.cfg.launch.maxRoundTripLossPct
+        ? { ok: false, reason: `sell-path check: round trip loses ${preview.roundTripLossPct.toFixed(1)}% (> ${this.cfg.launch.maxRoundTripLossPct}% launch limit)` }
+        : this.d.risk.checkQuote(lane === 'launch' ? { ...preview, roundTripLossPct: undefined, priceImpactPct: undefined } : preview);
       if (!q.ok) {
         log.warn(`skip ${c.symbol}: ${q.reason}`);
         if (preview.roundTripLossPct !== undefined && preview.roundTripLossPct > this.cfg.risk.maxRoundTripLossPct) this.blacklistAuto(c.mint, c.symbol, q.reason ?? 'sell-path check failed');
@@ -706,6 +815,7 @@ export class TradingBot extends EventEmitter {
         strategy: sig.strategy,
         status: 'open',
         stopPct: stop,
+        lane,
       };
       this.open.set(c.mint, p);
       this.d.store.upsertPosition(p);
@@ -716,8 +826,8 @@ export class TradingBot extends EventEmitter {
       });
       this.d.risk.onEntry();
       this.trackSlippage(c.mint, c.symbol, slippagePct);
-      this.emit('trade', { side: 'buy', symbol: c.symbol, mint: c.mint, sol: spent, reason: sig.reasons.join('; ') });
-      log.info(`OPENED ${c.symbol}: ${fromRaw(fill.outputAmountRaw, c.decimals).toFixed(4)} tokens for ${spent.toFixed(4)} SOL @ $${fmtNum(p.entryPriceUsd, 6)} sig=${fill.signature ?? '-'}`);
+      this.emit('trade', { side: 'buy', symbol: c.symbol, mint: c.mint, sol: spent, reason: sig.reasons.join('; '), lane });
+      log.info(`OPENED ${lane === 'launch' ? '[launch] ' : ''}${c.symbol}: ${fromRaw(fill.outputAmountRaw, c.decimals).toFixed(4)} tokens for ${spent.toFixed(4)} SOL @ $${fmtNum(p.entryPriceUsd, 6)} sig=${fill.signature ?? '-'}`);
       await this.d.notifier.send(
         `🟢 <b>BOUGHT ${c.symbol}</b> (${this.d.executor.mode})\n${spent.toFixed(4)} SOL @ $${fmtNum(p.entryPriceUsd, 6)}\nScore ${sig.score.toFixed(2)}: ${sig.reasons.slice(0, 3).join('; ')}` +
           (fill.signature && this.d.executor.mode === 'live' ? `\nhttps://solscan.io/tx/${fill.signature}` : ''),
@@ -757,7 +867,7 @@ export class TradingBot extends EventEmitter {
       const price = this.priceSolPerRaw(p.mint, p.decimals);
       const g = price ? this.d.positions.gainPct(p, price) : undefined;
       const age = Math.round((Date.now() - p.openedAt) / 60000);
-      return `  ${p.symbol.padEnd(8)} ${fmtPct(g).padStart(8)}  cost ${p.costSol.toFixed(3)} SOL  hwm ${fmtPct(p.entryPriceSol ? ((p.highWaterMarkSol - p.entryPriceSol) / p.entryPriceSol) * 100 : 0)}  tp ${p.ladderDone}/${this.cfg.risk.takeProfitLadder.length}  ${age}m`;
+      return `  ${(p.lane === 'launch' ? '🚀' + p.symbol : p.symbol).padEnd(8)} ${fmtPct(g).padStart(8)}  cost ${p.costSol.toFixed(3)} SOL  hwm ${fmtPct(p.entryPriceSol ? ((p.highWaterMarkSol - p.entryPriceSol) / p.entryPriceSol) * 100 : 0)}  tp ${p.ladderDone}/${this.cfg.risk.takeProfitLadder.length}  ${age}m`;
     });
     log.info(
       `status: balance ${balance.toFixed(4)} SOL | SOL $${this.solUsd.toFixed(2)} | daily pnl ${rs.dailyPnlSol >= 0 ? '+' : ''}${rs.dailyPnlSol.toFixed(4)} SOL | trades today ${rs.tradesToday} | tracking ${this.tracked.size} | open ${this.open.size}` +

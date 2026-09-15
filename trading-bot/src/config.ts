@@ -152,6 +152,59 @@ export const ConfigSchema = z.object({
       reentryCooldownMin: z.number().min(0).default(60),
     })
     .prefault({}),
+  launch: z
+    .object({
+      enabled: z.boolean().default(false), // opt-in: brand-new tokens are the riskiest thing on Solana
+      scanIntervalSec: z.number().min(20).default(45),
+      sources: z.array(z.enum(['jupiter_recent', 'jupiter_trending_5m', 'dexscreener_profiles'])).default(['jupiter_recent', 'jupiter_trending_5m', 'dexscreener_profiles']),
+      minAgeMinutes: z.number().min(0).default(3), // let the first bundle dump happen before we look
+      maxAgeMinutes: z.number().positive().default(120),
+      minLiquidityUsd: z.number().default(20_000),
+      maxLiquidityUsd: z.number().default(500_000),
+      minHolders: z.number().default(50),
+      minBuys5m: z.number().default(25),
+      minBuySellRatio5m: z.number().default(1.2),
+      minVolume5mUsd: z.number().default(5_000),
+      maxPriceChange5mPct: z.number().default(80),
+      requireSocials: z.boolean().default(false),
+      maxTopHoldersPct: z.number().default(35), // excluding pools
+      maxBundledHolders: z.number().int().default(3),
+      maxFreshWallets: z.number().int().default(6),
+      minScore: z.number().min(0).max(1).default(0.6),
+      sizeSol: z.number().positive().default(0.05),
+      maxOpen: z.number().int().min(1).default(2),
+      maxPerHour: z.number().int().min(1).default(6),
+      maxRoundTripLossPct: z.number().positive().default(10),
+      exits: z
+        .object({
+          stopLossPct: z.number().positive().default(20),
+          takeProfitLadder: z.array(LadderRung).min(1).default([
+            { gainPct: 30, sellPct: 50 },
+            { gainPct: 80, sellPct: 50 },
+            { gainPct: 200, sellPct: 100 },
+          ]),
+          trailingStop: z.object({ enabled: z.boolean().default(true), activationPct: z.number().default(25), trailPct: z.number().positive().default(15) }).prefault({}),
+          maxHoldMinutes: z.number().positive().default(45),
+          lockProfitFraction: z.number().min(0).max(1).default(0.3),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
+  holders: z
+    .object({
+      enabled: z.boolean().default(true), // deep holder analysis on scanner candidates (3 RPC calls per token)
+      topN: z.number().int().min(5).max(20).default(20),
+      maxBundledHolders: z.number().int().default(4), // hard reject above this
+      maxFreshWallets: z.number().int().default(8), // score penalty above this
+      freshWalletMaxSol: z.number().default(0.002),
+    })
+    .prefault({}),
+  stream: z
+    .object({
+      enabled: z.boolean().default(true), // WebSocket vault subscriptions for sub-second prices (needs an RPC with wss)
+      maxSubscriptions: z.number().int().min(1).max(100).default(25),
+    })
+    .prefault({}),
   telegram: z
     .object({
       commands: z.boolean().default(true), // accept /status /pause /close ... from the configured chat

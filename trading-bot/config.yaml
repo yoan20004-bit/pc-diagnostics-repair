@@ -9,6 +9,8 @@ loop:
   candleTimeframeSec: 60      # 1-minute candles
   warmupCandles: 40           # minimum candles before a strategy may fire
   maxCandles: 600
+  fastExitIntervalSec: 4      # extra price checks for held tokens only (0 = off)
+  staleFeedAlertSec: 90
 
 # Tokens you always want the bot to track (mint addresses). Leave empty to rely on the scanner.
 watchlist: []
@@ -51,6 +53,11 @@ strategy:
   name: composite             # momentum | meanReversion | breakout | composite
   minBuyScore: 0.62           # 0..1 confidence required to open
   minSellScore: 0.55          # 0..1 confidence required for a signal-based exit
+  htf:                        # higher-timeframe confirmation: buys only when the 5x-candle trend is bullish
+    enabled: true
+    multiplier: 5
+    emaFast: 9
+    emaSlow: 21
   params:
     emaFast: 9
     emaSlow: 21
@@ -70,13 +77,28 @@ strategy:
       breakout: 0.30
       meanReversion: 0.25
 
+regime:                       # no new entries while SOL itself is weak
+  enabled: true
+  solEmaPeriod: 50
+  maxSolDrop1hPct: 4
+
 risk:
+  volatility:                 # ATR-scaled stops + risk-based sizing
+    enabled: true
+    atrPeriod: 14
+    stopAtrMultiple: 2.5
+    minStopPct: 4
+    maxStopPct: 15
+    riskPerTradePct: 1        # a stop-out loses at most this % of the balance
+  lockProfitFraction: 0.5     # after a TP rung the stop moves to rung gain x this
+  maxRoundTripLossPct: 6      # sell-path check on every buy
+  autoBlacklist: { enabled: true, minFills: 2, maxAvgSlippagePct: 3 }
   positionSizeSol: 0.25       # SOL spent per entry (hard cap)
   positionSizePct: 10         # ...but never more than this % of the wallet's SOL balance
   maxOpenPositions: 3
   maxExposureSol: 0.75        # total SOL at risk across open positions
   minSolReserve: 0.05         # always keep this much SOL for fees/rent
-  stopLossPct: 8
+  stopLossPct: 8              # fallback when volatility sizing is off
   takeProfitLadder:           # partial exits; last rung closes the rest
     - { gainPct: 12, sellPct: 40 }
     - { gainPct: 25, sellPct: 30 }
@@ -93,6 +115,50 @@ risk:
   maxConsecutiveLosses: 3
   cooldownAfterLossMin: 20
   reentryCooldownMin: 60      # do not re-buy the same mint for this long after a sell
+
+# Opt-in second strategy: buy tokens minutes after launch when the first tape looks healthy.
+# Separate budget, limits and exits. Highest-risk mode: expect many small losses, occasional big wins.
+launch:
+  enabled: false
+  scanIntervalSec: 45
+  minAgeMinutes: 3          # let the first bundle dump happen before looking
+  maxAgeMinutes: 120
+  minLiquidityUsd: 20000
+  maxLiquidityUsd: 500000
+  minHolders: 50
+  minBuys5m: 25
+  minBuySellRatio5m: 1.2
+  minVolume5mUsd: 5000
+  maxPriceChange5mPct: 80
+  requireSocials: false
+  maxTopHoldersPct: 35      # pools excluded
+  maxBundledHolders: 3
+  maxFreshWallets: 6
+  minScore: 0.6
+  sizeSol: 0.05
+  maxOpen: 2
+  maxPerHour: 6
+  maxRoundTripLossPct: 10
+  exits:
+    stopLossPct: 20
+    takeProfitLadder:
+      - { gainPct: 30, sellPct: 50 }
+      - { gainPct: 80, sellPct: 50 }
+      - { gainPct: 200, sellPct: 100 }
+    trailingStop: { enabled: true, activationPct: 25, trailPct: 15 }
+    maxHoldMinutes: 45
+    lockProfitFraction: 0.3
+
+holders:
+  enabled: true             # deep holder analysis: pools excluded, bundles and throwaway wallets detected
+  topN: 20
+  maxBundledHolders: 4
+  maxFreshWallets: 8
+  freshWalletMaxSol: 0.002
+
+stream:
+  enabled: true             # sub-second prices from pool vaults over the RPC WebSocket
+  maxSubscriptions: 25
 
 execution:
   engine: ultra               # ultra (recommended: Jupiter handles fees, landing, MEV) | swap
