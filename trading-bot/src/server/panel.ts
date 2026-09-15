@@ -6,6 +6,7 @@ import { parse as parseYaml, stringify as toYaml } from 'yaml';
 import { PublicKey } from '@solana/web3.js';
 import type { TokenScanner } from '../analysis/scanner.js';
 import { runBacktest } from '../backtest/engine.js';
+import { tune, type TuneResult } from '../backtest/tuner.js';
 import type { TradingBot } from '../bot.js';
 import { ConfigSchema, type BotConfig } from '../config.js';
 import { createLogger, onLog, recentLogs } from '../logger.js';
@@ -47,6 +48,7 @@ export class PanelServer {
   private html: string;
   private startedAt = Date.now();
   private stateTimer: NodeJS.Timeout | undefined;
+  private tuneJob: { status: 'running' | 'done' | 'error'; startedAt: number; progress: number; total: number; label: string; result?: TuneResult; error?: string } | undefined;
 
   constructor(private opts: PanelOptions, private d: PanelDeps) {
     const here = dirname(fileURLToPath(import.meta.url));
@@ -131,6 +133,20 @@ export class PanelServer {
       }
       case 'GET /api/logs':
         return recentLogs(clampInt(q.get('limit'), 1, 500, 200), clampInt(q.get('since'), 0, Number.MAX_SAFE_INTEGER, 0));
+      case 'GET /api/analytics':
+        return { ...this.d.store.analytics(), slippage: this.d.store.slippageStats() };
+      case 'GET /api/health': {
+        const s = bot.snapshot();
+        const ok = !s.running || s.feedAgeSec < bot.config.loop.staleFeedAlertSec;
+        return { ok, running: s.running, paused: s.paused, feedAgeSec: s.feedAgeSec, open: s.positions.length, regime: s.regime.ok, uptimeSec: Math.round((Date.now() - this.startedAt) / 1000) };
+      }
+      case 'DELETE /api/blacklist':
+        bot.clearAutoBlacklist(q.get('mint') || undefined);
+        return { ok: true };
+      case 'POST /api/tune':
+        return this.startTune(body);
+      case 'GET /api/tune':
+        return this.tuneJob ?? { status: 'idle' };
       case 'POST /api/control': {
         const action = str(body.action);
         if (action === 'start') void bot.start().catch((e) => log.error('bot loop crashed:', (e as Error).message));
@@ -216,6 +232,34 @@ export class PanelServer {
     if (candles.length < cfg.loop.warmupCandles + 10) throw new HttpError(400, `only ${candles.length} candles available`);
     const result = runBacktest(candles, cfg, createStrategy(strategyName));
     return { symbol: pair.baseToken.symbol, pool: pair.pairAddress, dex: pair.dexId, timeframe: tf, strategy: strategyName, ...result, trades: result.trades.slice(-50), candles: candles.length, series: candles.map((c) => [c.t, c.c]) };
+  }
+
+  private async startTune(body: Record<string, unknown>) {
+    if (this.tuneJob?.status === 'running') throw new HttpError(409, 'a tuning run is already in progress');
+    const cfg = this.d.bot.config;
+    const mints = (Array.isArray(body.mints) ? body.mints : typeof body.mints === 'string' ? body.mints.split(/[\s,]+/) : []).map((m) => mintOf(m));
+    if (!mints.length || mints.length > 6) throw new HttpError(400, 'give 1 to 6 mint addresses');
+    const strategyName = (typeof body.strategy === 'string' ? body.strategy : cfg.strategy.name) as BotConfig['strategy']['name'];
+    const tf = clampInt(String(body.timeframe ?? cfg.loop.candleTimeframeSec), 15, 86400, cfg.loop.candleTimeframeSec);
+    const maxCombos = clampInt(String(body.maxCombos ?? 150), 4, 1000, 150);
+    this.tuneJob = { status: 'running', startedAt: Date.now(), progress: 0, total: maxCombos, label: `${mints.length} token(s), ${strategyName}` };
+    void (async () => {
+      try {
+        const sets = [];
+        for (const m of mints) {
+          const pair = bestPair(await this.d.dex.getTokenPairs(m), m);
+          if (!pair) throw new Error(`no pool for ${m}`);
+          const c = await this.d.gecko.getOhlcv(pair.pairAddress, tf, 1000);
+          if (c.length < cfg.loop.warmupCandles * 3) throw new Error(`${pair.baseToken.symbol}: only ${c.length} candles`);
+          sets.push(c);
+        }
+        const result = await tune(sets, cfg, { strategy: strategyName, maxCombos, timeBudgetMs: 10 * 60_000, onProgress: (d, t) => { if (this.tuneJob) { this.tuneJob.progress = d; this.tuneJob.total = t; } } });
+        this.tuneJob = { ...this.tuneJob!, status: 'done', result: { ...result, top: result.top.slice(0, 10) } };
+      } catch (e) {
+        this.tuneJob = { ...this.tuneJob!, status: 'error', error: (e as Error).message };
+      }
+    })();
+    return { ok: true, status: 'running' };
   }
 
   /* ---------------------------------------------------------------- SSE */

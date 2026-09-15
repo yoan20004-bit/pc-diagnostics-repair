@@ -1,6 +1,8 @@
 import type { BotConfig } from '../config.js';
 import { PositionManager } from '../trading/positions.js';
+import { RiskManager } from '../trading/risk.js';
 import type { Strategy } from '../strategies/base.js';
+import { atrPct, withFilters } from '../strategies/filters.js';
 import type { Candle, Position } from '../types.js';
 
 export interface BacktestTrade {
@@ -37,6 +39,8 @@ export interface BacktestOptions {
   /** fraction of equity per trade (0..1) */
   sizeFraction?: number;
   feeBps?: number; // round-trip fees + slippage in bps
+  /** candles of history handed to the strategy per bar (keeps the run O(n)) */
+  lookback?: number;
 }
 
 /**
@@ -44,11 +48,14 @@ export interface BacktestOptions {
  * PositionManager exit rules as the live bot. Stops are checked against the bar
  * low (pessimistic), signals/take-profits against the bar close.
  */
-export function runBacktest(candles: Candle[], cfg: BotConfig, strategy: Strategy, opts: BacktestOptions = {}): BacktestResult {
+export function runBacktest(candles: Candle[], cfg: BotConfig, baseStrategy: Strategy, opts: BacktestOptions = {}): BacktestResult {
   const startingEquity = opts.startingEquity ?? 1;
   const sizeFraction = Math.min(1, opts.sizeFraction ?? cfg.risk.positionSizePct / 100);
   const fee = (opts.feeBps ?? 80) / 10_000 / 2; // per side
+  const lookback = Math.max(opts.lookback ?? 300, cfg.strategy.params.emaTrend * 3, cfg.strategy.htf.multiplier * (cfg.strategy.htf.emaSlow + 3));
   const pm = new PositionManager(cfg.risk, cfg.strategy.minSellScore);
+  const rm = new RiskManager(cfg.risk);
+  const strategy = withFilters(baseStrategy, cfg);
   const warm = Math.max(cfg.loop.warmupCandles, 30);
 
   let equity = startingEquity;
@@ -84,12 +91,12 @@ export function runBacktest(candles: Candle[], cfg: BotConfig, strategy: Strateg
   };
 
   for (let i = warm; i < candles.length; i++) {
-    const window = candles.slice(0, i + 1);
+    const window = candles.slice(Math.max(0, i + 1 - lookback), i + 1);
     const bar = candles[i];
     if (pos) {
       exposureBars++;
       // pessimistic intrabar stop check
-      const stopPct = pos.ladderDone > 0 ? 0 : -cfg.risk.stopLossPct;
+      const stopPct = pm.stopLevelPct(pos);
       const stopPrice = pos.entryPriceSol * (1 + stopPct / 100);
       if (bar.l <= stopPrice && bar.o > stopPrice) {
         closeAt(i, stopPrice, 1, pos.ladderDone > 0 ? 'breakeven stop (intrabar)' : 'stop-loss (intrabar)', false);
@@ -102,14 +109,16 @@ export function runBacktest(candles: Candle[], cfg: BotConfig, strategy: Strateg
     if (!pos) {
       const sig = strategy.evaluate({ candles: window, params: cfg.strategy.params });
       if (sig.action === 'buy' && sig.score >= cfg.strategy.minBuyScore) {
-        const size = equity * sizeFraction;
+        const stopPct = rm.stopPctFor(atrPct(window, cfg.risk.volatility.atrPeriod));
+        let size = equity * sizeFraction;
+        if (cfg.risk.volatility.enabled) size = Math.min(size, (equity * cfg.risk.volatility.riskPerTradePct) / 100 / (stopPct / 100));
         if (size > 0) {
           const price = bar.c * (1 + fee);
           const units = size / price;
           equity -= size;
           pos = {
             id: `bt-${i}`, mint: 'bt', symbol: 'BT', decimals: 0, amountRaw: '0', costSol: size, entryPriceSol: price, entryPriceUsd: price,
-            openedAt: bar.t, highWaterMarkSol: price, ladderDone: 0, realisedSol: 0, strategy: sig.strategy, status: 'open', units, entryIdx: i, size,
+            openedAt: bar.t, highWaterMarkSol: price, ladderDone: 0, realisedSol: 0, strategy: sig.strategy, status: 'open', stopPct, units, entryIdx: i, size,
           };
         }
       }

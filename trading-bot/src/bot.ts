@@ -10,10 +10,13 @@ import type { Notifier } from './notify/telegram.js';
 import type { Store } from './storage/db.js';
 import type { Strategy } from './strategies/base.js';
 import { createStrategy } from './strategies/registry.js';
+import { atrPct, withFilters } from './strategies/filters.js';
+import { assessRegime } from './analysis/regime.js';
+import type { ExitDecision } from './trading/positions.js';
 import type { Executor } from './trading/executor.js';
 import type { PositionManager } from './trading/positions.js';
 import type { RiskManager } from './trading/risk.js';
-import type { Candidate, PairInfo, Position, Signal } from './types.js';
+import type { Candidate, PairInfo, Position, RegimeStatus, Signal } from './types.js';
 import { SOL_MINT, fmtNum, fmtPct, fromRaw, shortMint, sleep, uid } from './utils.js';
 
 const log = createLogger('bot');
@@ -65,6 +68,8 @@ export interface PositionView extends Position {
   unrealisedSol?: number;
   ageMin: number;
   ladderTotal: number;
+  /** current stop as gain % from entry (negative below entry) */
+  stopLevelPct: number;
 }
 
 export interface BotSnapshot {
@@ -85,6 +90,10 @@ export interface BotSnapshot {
   tracked: TrackedView[];
   strategy: string;
   config: BotConfig;
+  regime: RegimeStatus;
+  slippage: ReturnType<BotDeps['store']['slippageStats']>;
+  autoBlacklist: string[];
+  feedAgeSec: number;
 }
 
 export class TradingBot extends EventEmitter {
@@ -105,11 +114,32 @@ export class TradingBot extends EventEmitter {
   private lastBalance = 0;
   private scanRequested = false;
   private busy: Promise<void> | undefined;
+  private strategy: Strategy;
+  private regime: RegimeStatus = { ok: true, reason: 'not checked yet', checkedAt: 0 };
+  private regimeLogged = '';
+  private autoBlacklist: Set<string>;
+  private lastPriceOk = Date.now();
+  private staleAlerted = false;
+  private solSeeded = false;
+  private fastTimer: NodeJS.Timeout | undefined;
 
   constructor(private cfg: BotConfig, private env: EnvConfig, private d: BotDeps) {
     super();
     this.candles = new CandleStore(cfg.loop.candleTimeframeSec * 1000, cfg.loop.maxCandles);
+    this.strategy = withFilters(d.strategy, cfg);
+    this.autoBlacklist = new Set(d.store.getJson<string[]>('autoBlacklist') ?? []);
     for (const p of this.d.store.openPositions()) this.open.set(p.mint, p);
+  }
+
+  get regimeStatus() {
+    return this.regime;
+  }
+
+  clearAutoBlacklist(mint?: string) {
+    if (mint) this.autoBlacklist.delete(mint);
+    else this.autoBlacklist.clear();
+    this.d.store.setJson('autoBlacklist', [...this.autoBlacklist]);
+    this.emit('state');
   }
 
   /* ------------------------------------------------------------ panel API */
@@ -169,7 +199,9 @@ export class TradingBot extends EventEmitter {
     this.d.positions.setConfig(next.risk, next.strategy.minSellScore);
     this.d.scanner.setConfig(next);
     if (this.d.strategy.name !== next.strategy.name) this.d.strategy = createStrategy(next.strategy.name);
+    this.strategy = withFilters(this.d.strategy, next);
     this.candles = Object.assign(this.candles, { maxCandles: next.loop.maxCandles });
+    this.startFastLoop();
     log.info('config reloaded');
     this.emit('state');
   }
@@ -232,6 +264,7 @@ export class TradingBot extends EventEmitter {
         unrealisedSol: valueSol !== undefined ? valueSol - p.costSol : undefined,
         ageMin: Math.round((now - p.openedAt) / 60000),
         ladderTotal: this.cfg.risk.takeProfitLadder.length,
+        stopLevelPct: this.d.positions.stopLevelPct(p),
       };
     });
     const tracked: TrackedView[] = [...this.tracked.values()].map((c) => {
@@ -281,6 +314,10 @@ export class TradingBot extends EventEmitter {
       tracked,
       strategy: this.d.strategy.name,
       config: this.cfg,
+      regime: this.regime,
+      slippage: this.d.store.slippageStats(),
+      autoBlacklist: [...this.autoBlacklist],
+      feedAgeSec: Math.round((now - this.lastPriceOk) / 1000),
     };
   }
 
@@ -331,6 +368,7 @@ export class TradingBot extends EventEmitter {
       }
     }
 
+    this.startFastLoop();
     while (this.running) {
       const started = Date.now();
       try {
@@ -344,11 +382,28 @@ export class TradingBot extends EventEmitter {
       for (let waited = 0; waited < wait && this.running && !this.scanRequested; waited += 500) await sleep(500);
     }
     log.info('bot loop stopped');
+    if (this.fastTimer) clearInterval(this.fastTimer);
+    this.fastTimer = undefined;
     this.emit('state');
   }
 
   stop() {
     this.running = false;
+  }
+
+  /** Extra, cheaper loop: refresh only held tokens and check exits, so stops fire quickly. */
+  private startFastLoop() {
+    if (this.fastTimer) clearInterval(this.fastTimer);
+    this.fastTimer = undefined;
+    const every = this.cfg.loop.fastExitIntervalSec;
+    if (!every || !this.running) return;
+    this.fastTimer = setInterval(() => {
+      if (!this.running || !this.open.size || this.busy) return;
+      void this.withLock(async () => {
+        await this.refreshPrices([...this.open.keys()], Date.now());
+        await this.manageExits();
+      }).catch((e) => log.debug('fast exit loop:', (e as Error).message));
+    }, every * 1000);
   }
 
   async tick() {
@@ -365,6 +420,13 @@ export class TradingBot extends EventEmitter {
       return;
     }
     await this.refreshPrices(mints, now);
+    this.watchFeed(now);
+    this.regime = assessRegime(this.candles.get(SOL_MINT), this.cfg, this.cfg.loop.candleTimeframeSec, now);
+    const regimeKey = this.regime.ok ? 'ok' : `off:${this.regime.reason.replace(/[\d.$%-]+/g, '#')}`; // log on flips, not on every number change
+    if (regimeKey !== this.regimeLogged) {
+      this.regimeLogged = regimeKey;
+      (this.regime.ok ? log.info : log.warn)(`market regime ${this.regime.ok ? 'OK' : 'RISK-OFF'}: ${this.regime.reason}`);
+    }
     if (now - this.lastPairRefresh >= 60_000) {
       this.lastPairRefresh = now;
       try {
@@ -386,12 +448,36 @@ export class TradingBot extends EventEmitter {
   }
 
   private async refreshPrices(mints: string[], now: number) {
-    const prices = await this.d.jup.getPrices([SOL_MINT, ...mints]);
-    if (prices[SOL_MINT]) this.solUsd = prices[SOL_MINT].usdPrice;
+    let prices: Awaited<ReturnType<BotDeps['jup']['getPrices']>>;
+    try {
+      prices = await this.d.jup.getPrices([SOL_MINT, ...mints]);
+    } catch (e) {
+      log.warn(`price refresh failed: ${(e as Error).message}`);
+      return;
+    }
+    if (prices[SOL_MINT]) {
+      this.solUsd = prices[SOL_MINT].usdPrice;
+      this.candles.addTick(SOL_MINT, this.solUsd, now);
+      this.lastPriceOk = now;
+      if (this.staleAlerted) {
+        this.staleAlerted = false;
+        log.info('price feed recovered');
+      }
+    }
     for (const m of mints) {
       const p = prices[m];
       if (p) this.candles.addTick(m, p.usdPrice, now);
       else log.debug(`no price for ${shortMint(m)}`);
+    }
+  }
+
+  /** Alert once when prices stop arriving; exits cannot be managed without a feed. */
+  private watchFeed(now: number) {
+    const age = (now - this.lastPriceOk) / 1000;
+    if (age >= this.cfg.loop.staleFeedAlertSec && !this.staleAlerted) {
+      this.staleAlerted = true;
+      log.error(`price feed stale for ${Math.round(age)}s (RPC/Jupiter down or rate limited); open positions are unprotected until it recovers`);
+      void this.d.notifier.send(`⚠️ <b>Price feed stale</b> for ${Math.round(age)}s. Open positions cannot be managed until it recovers.`);
     }
   }
 
@@ -419,6 +505,15 @@ export class TradingBot extends EventEmitter {
     if (added.length || dropped.length) {
       log.info(`tracking ${this.tracked.size} tokens: ${[...this.tracked.values()].map((c) => c.symbol).join(', ')}` + (dropped.length ? ` (dropped ${dropped.length})` : ''));
     }
+    if (!this.solSeeded && this.cfg.regime.enabled) {
+      this.solSeeded = true;
+      try {
+        const hist = await this.d.gecko.getOhlcv(this.cfg.regime.solPool, this.cfg.loop.candleTimeframeSec, this.cfg.loop.maxCandles);
+        if (hist.length) this.candles.seed(SOL_MINT, hist);
+      } catch (e) {
+        log.debug(`SOL candle seed failed: ${(e as Error).message}`);
+      }
+    }
     // bootstrap candle history so strategies can act right away
     for (const m of [...next.keys()]) {
       if (this.seeded.has(m)) continue;
@@ -439,7 +534,7 @@ export class TradingBot extends EventEmitter {
 
   private signalFor(mint: string, position?: Position): Signal {
     const c = this.tracked.get(mint);
-    return this.d.strategy.evaluate({
+    return this.strategy.evaluate({
       candles: this.candles.get(mint),
       params: this.cfg.strategy.params,
       pair: this.pairs.get(mint),
@@ -460,11 +555,11 @@ export class TradingBot extends EventEmitter {
       if (!decision) continue;
       const failures = this.sellFailures.get(p.id) ?? 0;
       if (failures > 0 && this.tickNo % Math.min(2 ** failures, 16) !== 0) continue; // back off after failures
-      await this.exit(p, decision.sellPct, `${decision.kind}: ${decision.reason}`, decision.kind === 'takeProfit');
+      await this.exit(p, decision.sellPct, `${decision.kind}: ${decision.reason}`, decision.kind === 'takeProfit', decision.kind);
     }
   }
 
-  private async exit(p: Position, sellPct: number, reason: string, isLadderRung: boolean) {
+  private async exit(p: Position, sellPct: number, reason: string, isLadderRung: boolean, exitKind: ExitDecision['kind'] | 'manual' = 'manual') {
     const held = this.d.executor.mode === 'live' ? await this.d.executor.tokenBalance(p.mint).catch(() => BigInt(p.amountRaw)) : BigInt(p.amountRaw);
     const total = held > 0n ? held : BigInt(p.amountRaw);
     const amount = sellPct >= 100 ? total : (total * BigInt(Math.round(sellPct * 100))) / 10000n;
@@ -476,8 +571,10 @@ export class TradingBot extends EventEmitter {
     const fraction = Number(amount) / Number(total);
     log.info(`SELL ${p.symbol} ${sellPct}% (${fromRaw(amount, p.decimals).toFixed(4)} tokens) - ${reason}`);
     try {
+      const expected = await this.d.executor.previewSell(p.mint, amount).catch(() => undefined);
       const fill = await this.d.executor.sell(p.mint, p.decimals, amount);
       const received = fromRaw(fill.outputAmountRaw, 9);
+      const slippagePct = expected?.expectedSolOut ? ((expected.expectedSolOut - received) / expected.expectedSolOut) * 100 : undefined;
       const costPart = p.costSol * fraction;
       const pnl = received - costPart;
       const closedFully = sellPct >= 100 || total - amount <= 0n;
@@ -496,8 +593,10 @@ export class TradingBot extends EventEmitter {
         positionId: p.id, mint: p.mint, symbol: p.symbol, side: 'sell', amountRaw: amount.toString(), sol: received,
         priceSol: fill.priceSol, priceUsd: fill.priceSol * this.solUsd * 10 ** p.decimals, feeSol: fill.feeSol, signature: fill.signature,
         reason, mode: this.d.executor.mode, ts: Date.now(), pnlSol: pnl,
+        expectedPriceSol: expected?.expectedSolOut && amount > 0n ? expected.expectedSolOut / Number(amount) : undefined, slippagePct, exitKind,
       });
       this.d.risk.onExit(p.mint, pnl, closedFully);
+      this.trackSlippage(p.mint, p.symbol, slippagePct);
       this.sellFailures.delete(p.id);
       this.emit('trade', { side: 'sell', symbol: p.symbol, mint: p.mint, sol: received, pnlSol: pnl, reason, closedFully });
       const pnlPct = costPart ? (pnl / costPart) * 100 : 0;
@@ -540,13 +639,17 @@ export class TradingBot extends EventEmitter {
       }
       const sig = this.signalFor(c.mint);
       this.lastSignals.set(c.mint, sig);
-      if (this.cfg.blacklist.includes(c.mint)) continue;
+      if (this.cfg.blacklist.includes(c.mint) || this.autoBlacklist.has(c.mint)) continue;
       if (sig.action === 'buy' && sig.score >= this.cfg.strategy.minBuyScore) ranked.push({ c, sig });
       else if (sig.score >= 0.4) log.debug(`${c.symbol}: ${sig.action} ${sig.score.toFixed(2)} - ${sig.reasons.slice(0, 3).join('; ')}`);
     }
     ranked.sort((a, b) => b.sig.score - a.sig.score);
     if (this.paused) {
       if (ranked.length) log.info(`paused: skipping ${ranked.length} buy signal(s) (${ranked.map((r) => r.c.symbol).join(', ')})`);
+      return;
+    }
+    if (!this.regime.ok) {
+      if (ranked.length) log.info(`risk-off (${this.regime.reason}): skipping ${ranked.map((r) => r.c.symbol).join(', ')}`);
       return;
     }
 
@@ -559,8 +662,13 @@ export class TradingBot extends EventEmitter {
         if (check.reason?.startsWith('re-entry')) continue; // per-token limit: try the next candidate
         break; // global limit: nothing else can open this tick
       }
-      const size = this.d.risk.positionSize(bal, exp);
-      const spent = await this.enter(c, sig, size);
+      const stopPct = this.d.risk.stopPctFor(atrPct(this.candles.get(c.mint), this.cfg.risk.volatility.atrPeriod));
+      const size = this.d.risk.positionSize(bal, exp, stopPct);
+      if (size <= 0) {
+        log.info(`skip ${c.symbol}: risk-based size too small (stop ${stopPct.toFixed(1)}%)`);
+        continue;
+      }
+      const spent = await this.enter(c, sig, size, stopPct);
       if (spent > 0) {
         exp += spent;
         bal -= spent;
@@ -568,17 +676,20 @@ export class TradingBot extends EventEmitter {
     }
   }
 
-  private async enter(c: Candidate, sig: Signal, sizeSol: number): Promise<number> {
-    log.info(`BUY signal ${c.symbol} score=${sig.score.toFixed(2)} size=${sizeSol} SOL :: ${sig.reasons.slice(0, 4).join('; ')}`);
+  private async enter(c: Candidate, sig: Signal, sizeSol: number, stopPct?: number): Promise<number> {
+    const stop = stopPct ?? this.d.risk.stopPctFor(atrPct(this.candles.get(c.mint), this.cfg.risk.volatility.atrPeriod));
+    log.info(`BUY signal ${c.symbol} score=${sig.score.toFixed(2)} size=${sizeSol} SOL stop=${stop.toFixed(1)}% :: ${sig.reasons.slice(0, 4).join('; ')}`);
     try {
       const preview = await this.d.executor.previewBuy(c.mint, sizeSol);
       const q = this.d.risk.checkQuote(preview);
       if (!q.ok) {
         log.warn(`skip ${c.symbol}: ${q.reason}`);
+        if (preview.roundTripLossPct !== undefined && preview.roundTripLossPct > this.cfg.risk.maxRoundTripLossPct) this.blacklistAuto(c.mint, c.symbol, q.reason ?? 'sell-path check failed');
         return 0;
       }
       const fill = await this.d.executor.buy(c.mint, c.decimals, sizeSol);
       const spent = fromRaw(fill.inputAmountRaw, 9) + fill.feeSol;
+      const slippagePct = preview.expectedPriceSol ? ((fill.priceSol - preview.expectedPriceSol) / preview.expectedPriceSol) * 100 : undefined;
       const p: Position = {
         id: uid(),
         mint: c.mint,
@@ -594,15 +705,17 @@ export class TradingBot extends EventEmitter {
         realisedSol: 0,
         strategy: sig.strategy,
         status: 'open',
+        stopPct: stop,
       };
       this.open.set(c.mint, p);
       this.d.store.upsertPosition(p);
       this.d.store.insertTrade({
         positionId: p.id, mint: c.mint, symbol: c.symbol, side: 'buy', amountRaw: p.amountRaw, sol: spent, priceSol: fill.priceSol,
         priceUsd: p.entryPriceUsd, feeSol: fill.feeSol, signature: fill.signature, reason: `${sig.strategy} ${sig.score.toFixed(2)}: ${sig.reasons.slice(0, 3).join('; ')}`,
-        mode: this.d.executor.mode, ts: Date.now(),
+        mode: this.d.executor.mode, ts: Date.now(), expectedPriceSol: preview.expectedPriceSol, slippagePct,
       });
       this.d.risk.onEntry();
+      this.trackSlippage(c.mint, c.symbol, slippagePct);
       this.emit('trade', { side: 'buy', symbol: c.symbol, mint: c.mint, sol: spent, reason: sig.reasons.join('; ') });
       log.info(`OPENED ${c.symbol}: ${fromRaw(fill.outputAmountRaw, c.decimals).toFixed(4)} tokens for ${spent.toFixed(4)} SOL @ $${fmtNum(p.entryPriceUsd, 6)} sig=${fill.signature ?? '-'}`);
       await this.d.notifier.send(
@@ -614,6 +727,26 @@ export class TradingBot extends EventEmitter {
       log.error(`buy failed for ${c.symbol}: ${(e as Error).message}`);
       return 0;
     }
+  }
+
+  /* ------------------------------------------------------------ slippage */
+  private trackSlippage(mint: string, symbol: string, slippagePct?: number) {
+    if (slippagePct === undefined) return;
+    if (Math.abs(slippagePct) > 0.5) log.info(`${symbol}: execution ${slippagePct > 0 ? 'worse' : 'better'} than quote by ${Math.abs(slippagePct).toFixed(2)}%`);
+    const ab = this.cfg.risk.autoBlacklist;
+    if (!ab.enabled) return;
+    const st = this.d.store.slippageStats().byMint[mint];
+    if (st && st.fills >= ab.minFills && st.avgPct > ab.maxAvgSlippagePct) {
+      this.blacklistAuto(mint, symbol, `average execution shortfall ${st.avgPct.toFixed(2)}% over ${st.fills} fills`);
+    }
+  }
+
+  private blacklistAuto(mint: string, symbol: string, why: string) {
+    if (this.autoBlacklist.has(mint)) return;
+    this.autoBlacklist.add(mint);
+    this.d.store.setJson('autoBlacklist', [...this.autoBlacklist]);
+    log.warn(`auto-blacklisted ${symbol}: ${why}`);
+    void this.d.notifier.send(`⛔ <b>${symbol} blacklisted</b>: ${why}`);
   }
 
   /* --------------------------------------------------------------- status */
@@ -629,6 +762,7 @@ export class TradingBot extends EventEmitter {
     log.info(
       `status: balance ${balance.toFixed(4)} SOL | SOL $${this.solUsd.toFixed(2)} | daily pnl ${rs.dailyPnlSol >= 0 ? '+' : ''}${rs.dailyPnlSol.toFixed(4)} SOL | trades today ${rs.tradesToday} | tracking ${this.tracked.size} | open ${this.open.size}` +
         (rs.haltedReason ? ` | HALTED: ${rs.haltedReason}` : '') +
+        (this.regime.ok ? '' : ` | RISK-OFF: ${this.regime.reason}`) +
         (lines.length ? '\n' + lines.join('\n') : ''),
     );
   }

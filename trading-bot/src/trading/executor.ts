@@ -13,12 +13,23 @@ export interface QuotePreview {
   slippageBps?: number;
   outAmountRaw: bigint;
   route?: string;
+  /** expected SOL per raw token unit */
+  expectedPriceSol: number;
+  /** % lost by immediately selling what the buy returns (sell-path verification) */
+  roundTripLossPct?: number;
+}
+
+export interface SellPreview {
+  expectedSolOut: number;
+  priceImpactPct?: number;
 }
 
 export interface Executor {
   readonly mode: 'paper' | 'live';
-  /** Preview a buy without executing (for risk checks). */
+  /** Preview a buy without executing (for risk checks and slippage tracking). Verifies the sell path too. */
   previewBuy(mint: string, solAmount: number): Promise<QuotePreview>;
+  /** Expected SOL from selling the given amount right now. */
+  previewSell(mint: string, amountRaw: bigint): Promise<SellPreview>;
   buy(mint: string, decimals: number, solAmount: number): Promise<Fill>;
   sell(mint: string, decimals: number, amountRaw: bigint): Promise<Fill>;
   solBalance(): Promise<number>;
@@ -52,12 +63,31 @@ export class LiveExecutor implements Executor {
 
   async previewBuy(mint: string, solAmount: number): Promise<QuotePreview> {
     const amount = toRaw(solAmount, 9);
-    if (this.cfg.engine === 'ultra') {
-      const o = await this.jup.ultraOrder({ inputMint: SOL_MINT, outputMint: mint, amount, taker: this.pubkey, slippageBps: this.cfg.ultraSlippageBps });
-      return { priceImpactPct: num(o.priceImpactPct), slippageBps: o.slippageBps, outAmountRaw: BigInt(o.outAmount), route: o.router };
-    }
+    // quotes (not orders) for both legs: cheap, and the sell leg proves the token can be sold
     const q = await this.jup.swapQuote({ inputMint: SOL_MINT, outputMint: mint, amount, slippageBps: this.cfg.slippageBps });
-    return { priceImpactPct: num(q.priceImpactPct), slippageBps: q.slippageBps, outAmountRaw: BigInt(q.outAmount), route: q.routePlan?.map((r) => r.swapInfo?.label).join('>') };
+    const out = BigInt(q.outAmount);
+    let roundTripLossPct: number | undefined;
+    try {
+      const back = await this.jup.swapQuote({ inputMint: mint, outputMint: SOL_MINT, amount: out, slippageBps: this.cfg.slippageBps });
+      const solBack = fromRaw(BigInt(back.outAmount), 9);
+      roundTripLossPct = ((solAmount - solBack) / solAmount) * 100;
+    } catch (e) {
+      log.warn(`sell-path quote failed for ${mint}: ${(e as Error).message}`);
+      roundTripLossPct = 100; // cannot be sold right now
+    }
+    return {
+      priceImpactPct: num(q.priceImpactPct),
+      slippageBps: q.slippageBps,
+      outAmountRaw: out,
+      route: q.routePlan?.map((r) => r.swapInfo?.label).join('>'),
+      expectedPriceSol: out > 0n ? solAmount / Number(out) : 0,
+      roundTripLossPct,
+    };
+  }
+
+  async previewSell(mint: string, amountRaw: bigint): Promise<SellPreview> {
+    const q = await this.jup.swapQuote({ inputMint: mint, outputMint: SOL_MINT, amount: amountRaw, slippageBps: this.cfg.slippageBps });
+    return { expectedSolOut: fromRaw(BigInt(q.outAmount), 9), priceImpactPct: num(q.priceImpactPct) };
   }
 
   async buy(mint: string, _decimals: number, solAmount: number): Promise<Fill> {
@@ -182,8 +212,12 @@ export class PaperExecutor implements Executor {
 
   async previewBuy(mint: string, solAmount: number): Promise<QuotePreview> {
     const p = this.requirePrice(mint);
-    const slip = 1 + this.cfg.paperSlippageBps / 10_000;
-    return { priceImpactPct: 0.1, slippageBps: this.cfg.paperSlippageBps, outAmountRaw: BigInt(Math.floor(solAmount / (p * slip))), route: 'paper' };
+    return { priceImpactPct: 0.1, slippageBps: this.cfg.paperSlippageBps, outAmountRaw: BigInt(Math.floor(solAmount / p)), route: 'paper', expectedPriceSol: p, roundTripLossPct: (this.cfg.paperSlippageBps / 10_000) * 200 };
+  }
+
+  async previewSell(mint: string, amountRaw: bigint): Promise<SellPreview> {
+    const p = this.requirePrice(mint);
+    return { expectedSolOut: Number(amountRaw) * p, priceImpactPct: 0.1 };
   }
 
   async buy(mint: string, _decimals: number, solAmount: number): Promise<Fill> {

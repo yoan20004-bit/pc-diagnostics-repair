@@ -29,6 +29,15 @@ export class PositionManager {
     return false;
   }
 
+  /** Current stop as a gain % relative to entry (negative = below entry). */
+  stopLevelPct(p: Position): number {
+    if (p.ladderDone > 0) {
+      const rung = this.cfg.takeProfitLadder[Math.min(p.ladderDone, this.cfg.takeProfitLadder.length) - 1];
+      return rung ? rung.gainPct * this.cfg.lockProfitFraction : 0;
+    }
+    return -(p.stopPct ?? this.cfg.stopLossPct);
+  }
+
   gainPct(p: Position, priceSol: number): number {
     return p.entryPriceSol ? ((priceSol - p.entryPriceSol) / p.entryPriceSol) * 100 : 0;
   }
@@ -38,10 +47,11 @@ export class PositionManager {
     const gain = this.gainPct(p, priceSol);
     const ladder = this.cfg.takeProfitLadder;
 
-    // 1. hard stop-loss; moves to breakeven once the first TP rung is banked
-    const stopPct = p.ladderDone > 0 ? 0 : -this.cfg.stopLossPct;
-    if (gain <= stopPct) {
-      return { reason: p.ladderDone > 0 ? `breakeven stop hit (${gain.toFixed(2)}%)` : `stop-loss hit (${gain.toFixed(2)}%)`, sellPct: 100, kind: 'stop' };
+    // 1. hard stop-loss (ATR-scaled per position); after a TP rung it becomes a profit-lock stop
+    const stopLevel = this.stopLevelPct(p);
+    if (gain <= stopLevel) {
+      const label = p.ladderDone > 0 ? (stopLevel > 0 ? `profit-lock stop at +${stopLevel.toFixed(1)}%` : 'breakeven stop') : `stop-loss (${(p.stopPct ?? this.cfg.stopLossPct).toFixed(1)}%)`;
+      return { reason: `${label} hit (${gain.toFixed(2)}%)`, sellPct: 100, kind: 'stop' };
     }
 
     // 2. trailing stop

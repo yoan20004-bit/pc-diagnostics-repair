@@ -101,6 +101,8 @@ export interface Position {
   status: 'open' | 'closed';
   closedAt?: number;
   closeReason?: string;
+  /** stop distance in % chosen at entry (ATR-scaled); falls back to risk.stopLossPct */
+  stopPct?: number;
 }
 
 export interface Trade {
@@ -119,6 +121,11 @@ export interface Trade {
   mode: 'paper' | 'live';
   ts: number;
   pnlSol?: number;
+  /** price the quote promised (SOL per raw unit) */
+  expectedPriceSol?: number;
+  /** execution shortfall vs the quote in % (positive = worse than quoted) */
+  slippagePct?: number;
+  exitKind?: string;
 }
 
 export interface Fill {
@@ -131,6 +138,15 @@ export interface Fill {
   slippageBps?: number;
   priceImpactPct?: number;
   route?: string;
+}
+
+export interface RegimeStatus {
+  ok: boolean;
+  reason: string;
+  solPrice?: number;
+  solEma?: number;
+  solChange1hPct?: number;
+  checkedAt: number;
 }
 
 export interface Candidate {

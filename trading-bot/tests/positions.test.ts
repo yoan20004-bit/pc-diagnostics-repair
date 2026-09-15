@@ -12,6 +12,7 @@ const risk = cfg({
     ],
     trailingStop: { enabled: true, activationPct: 15, trailPct: 5 },
     maxHoldMinutes: 60,
+    lockProfitFraction: 0, // classic breakeven behaviour for these tests; profit-lock is covered in upgrades.test.ts
   },
 }).risk;
 

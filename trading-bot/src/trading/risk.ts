@@ -100,22 +100,40 @@ export class RiskManager {
     return { ok: true };
   }
 
-  /** SOL to spend on a new entry, honouring all caps. */
-  positionSize(balanceSol: number, exposureSol: number): number {
+  /**
+   * SOL to spend on a new entry, honouring all caps. With volatility sizing on, the
+   * position is also limited so that hitting the stop loses at most riskPerTradePct of the balance.
+   */
+  positionSize(balanceSol: number, exposureSol: number, stopPct?: number): number {
     const byPct = (balanceSol * this.cfg.positionSizePct) / 100;
     const byExposure = this.cfg.maxExposureSol - exposureSol;
     const byReserve = balanceSol - this.cfg.minSolReserve;
-    const size = Math.min(this.cfg.positionSizeSol, byPct, byExposure, byReserve);
+    let size = Math.min(this.cfg.positionSizeSol, byPct, byExposure, byReserve);
+    const v = this.cfg.volatility;
+    if (v.enabled && stopPct && stopPct > 0) {
+      const byRisk = (balanceSol * v.riskPerTradePct) / 100 / (stopPct / 100);
+      size = Math.min(size, byRisk);
+    }
     return size >= 0.005 ? Math.floor(size * 1e6) / 1e6 : 0;
   }
 
+  /** Stop distance for a new position from current volatility (ATR as % of price). */
+  stopPctFor(atrPct?: number): number {
+    const v = this.cfg.volatility;
+    if (!v.enabled || !atrPct || !Number.isFinite(atrPct)) return this.cfg.stopLossPct;
+    return Math.min(v.maxStopPct, Math.max(v.minStopPct, atrPct * v.stopAtrMultiple));
+  }
+
   /** Validate a quote against slippage/impact limits. */
-  checkQuote(q: { priceImpactPct?: number; slippageBps?: number }): { ok: boolean; reason?: string } {
+  checkQuote(q: { priceImpactPct?: number; slippageBps?: number; roundTripLossPct?: number }): { ok: boolean; reason?: string } {
     if (q.priceImpactPct !== undefined && q.priceImpactPct > this.cfg.maxPriceImpactPct) {
       return { ok: false, reason: `price impact ${q.priceImpactPct.toFixed(2)}% > ${this.cfg.maxPriceImpactPct}%` };
     }
     if (q.slippageBps !== undefined && q.slippageBps > this.cfg.maxSlippageBps) {
       return { ok: false, reason: `slippage ${q.slippageBps}bps > ${this.cfg.maxSlippageBps}bps` };
+    }
+    if (q.roundTripLossPct !== undefined && q.roundTripLossPct > this.cfg.maxRoundTripLossPct) {
+      return { ok: false, reason: `sell-path check: buying then selling loses ${q.roundTripLossPct.toFixed(1)}% (> ${this.cfg.maxRoundTripLossPct}%): likely transfer tax or unsellable` };
     }
     return { ok: true };
   }

@@ -78,6 +78,16 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
 .toast.good{border-color:#2E5A3A;color:var(--good)}
 .reasons{font-size:11px;color:var(--mute);white-space:normal;max-width:360px}
 .warnbox{border-left:3px solid var(--warn);background:#221E14;padding:8px 12px;border-radius:0 6px 6px 0;margin-bottom:12px;font-size:13px}
+.regime{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--mute);margin:-4px 0 12px}
+.regime .st{font-family:var(--mono);font-weight:600;padding:2px 7px;border-radius:4px}
+.regime .st.ok{background:#173A2A;color:var(--good)}.regime .st.off{background:#3B1F1F;color:var(--bad)}
+.chartsel{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.chartsel select{width:auto;min-width:160px}
+.legend{display:flex;gap:12px;font-size:11px;color:var(--mute);flex-wrap:wrap}
+.legend i{display:inline-block;width:14px;height:0;border-top:2px solid;vertical-align:middle;margin-right:4px}
+.prog{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;margin:8px 0}
+.prog i{display:block;height:100%;background:var(--acc)}
+.note{font-size:12px;color:var(--mute);margin:8px 0 0}
 .toggle{display:flex;align-items:center;gap:8px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -94,6 +104,7 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
 </div>
 <div class="wrap">
   <div id="halt" class="warnbox" hidden></div>
+  <div class="regime"><span>Market regime</span><span id="regimeSt" class="st ok">…</span><span id="regimeWhy"></span><span id="feed" class="m"></span></div>
   <div class="kpis">
     <div class="kpi"><div class="l">Balance</div><div class="v" id="kBal">–</div><div class="s" id="kBalUsd"></div></div>
     <div class="kpi"><div class="l">Today</div><div class="v" id="kDay">–</div><div class="s" id="kDayS"></div></div>
@@ -103,11 +114,14 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
     <div class="kpi"><div class="l">SOL</div><div class="v" id="kSol">–</div><div class="s" id="kSolS"></div></div>
   </div>
   <nav class="tabs" id="tabs">
-    <button data-v="overview" class="on">Overview</button><button data-v="market">Market</button><button data-v="trades">Trades</button><button data-v="logs">Logs</button><button data-v="tools">Tools</button><button data-v="settings">Settings</button>
+    <button data-v="overview" class="on">Overview</button><button data-v="market">Market</button><button data-v="trades">Trades</button><button data-v="analytics">Analytics</button><button data-v="logs">Logs</button><button data-v="tools">Tools</button><button data-v="settings">Settings</button>
   </nav>
 
   <section class="view on" id="v-overview">
     <div class="card"><h3>Open positions <span class="r" id="posSum"></span></h3><div class="tbl" id="positions"></div></div>
+    <div class="card"><h3>Chart <span class="r" id="chartInfo"></span></h3>
+      <div class="chartsel"><select id="chartMint"></select><span class="legend"><span><i style="border-color:#63B8D6"></i>entry</span><span><i style="border-color:#F0605D"></i>stop</span><span><i style="border-color:#4BC672"></i>take-profit</span><span><i style="border-color:#E8B84A"></i>trailing</span></span></div>
+      <canvas id="chart" data-h="260"></canvas></div>
     <div class="grid2">
       <div class="card"><h3>Realised PnL <span class="r" id="eqSum"></span></h3><canvas id="equity" data-h="200"></canvas></div>
       <div class="card"><h3>Engine</h3><div class="result"><dl id="engine"></dl></div></div>
@@ -120,6 +134,18 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
 
   <section class="view" id="v-trades">
     <div class="card"><h3>Trade history</h3><div class="tbl" id="trades"></div></div>
+  </section>
+
+  <section class="view" id="v-analytics">
+    <div class="kpis" id="anaKpis"></div>
+    <div class="grid2">
+      <div class="card"><h3>By strategy</h3><div class="tbl" id="anaStrategy"></div></div>
+      <div class="card"><h3>By exit reason</h3><div class="tbl" id="anaExit"></div></div>
+      <div class="card"><h3>By token</h3><div class="tbl" id="anaToken"></div></div>
+      <div class="card"><h3>By hour (UTC)</h3><div class="tbl" id="anaHour"></div></div>
+      <div class="card"><h3>Execution quality <span class="r">quote vs fill</span></h3><div class="tbl" id="anaSlip"></div></div>
+      <div class="card"><h3>Auto-blacklist <span class="r" id="blSum"></span></h3><div id="anaBl"></div></div>
+    </div>
   </section>
 
   <section class="view" id="v-logs">
@@ -146,6 +172,17 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
       </div>
       <div class="result" id="btOut"></div>
       <canvas id="btChart" data-h="160" hidden></canvas>
+    </div>
+    <div class="card"><h3>Parameter tuner <span class="r">walk-forward, ranked out of sample</span></h3>
+      <div class="row">
+        <div class="field"><label for="tuneMints">Mint addresses (1 to 6, comma separated)</label><input id="tuneMints" placeholder="paste a few tokens you would trade"></div>
+        <div class="field" style="max-width:160px"><label for="tuneStrat">Strategy</label><select id="tuneStrat"><option value="composite">composite</option><option value="momentum">momentum</option><option value="meanReversion">meanReversion</option><option value="breakout">breakout</option></select></div>
+        <div class="field" style="max-width:120px"><label for="tuneCombos">Combos</label><input id="tuneCombos" type="number" value="150"></div>
+        <button class="btn" id="btnTune" style="align-self:flex-end">Run tuner</button>
+      </div>
+      <div class="prog" id="tuneProg" hidden><i style="width:0"></i></div>
+      <div class="result" id="tuneOut"></div>
+      <p class="note">Each token's history is split 70/30. Parameters are scored only on the later 30% they never saw, minus half the drawdown, so the winner is not just a curve fit. Apply writes them to config and the bot picks them up immediately.</p>
     </div>
   </section>
 
@@ -174,6 +211,14 @@ textarea{font-family:var(--mono);font-size:12px;min-height:420px;resize:vertical
         <div class="field"><label for="qOrg">Min organic score</label><input id="qOrg" type="number" step="1"></div>
         <div class="field"><label for="qAge">Min age (h)</label><input id="qAge" type="number" step="1"></div>
         <div class="field"><label for="qCand">Max tracked</label><input id="qCand" type="number" step="1"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div class="field"><label for="qVol">ATR stops &amp; risk sizing</label><select id="qVol"><option value="true">on</option><option value="false">off (fixed stop)</option></select></div>
+        <div class="field"><label for="qAtrMult">Stop = ATR ×</label><input id="qAtrMult" type="number" step="0.5"></div>
+        <div class="field"><label for="qRiskPct">Risk per trade %</label><input id="qRiskPct" type="number" step="0.25"></div>
+        <div class="field"><label for="qLock">Lock banked gain (0–1)</label><input id="qLock" type="number" step="0.1" min="0" max="1"></div>
+        <div class="field"><label for="qHtf">Higher-timeframe filter</label><select id="qHtf"><option value="true">on</option><option value="false">off</option></select></div>
+        <div class="field"><label for="qRegime">SOL regime filter</label><select id="qRegime"><option value="true">on</option><option value="false">off</option></select></div>
       </div>
       <div class="row" style="margin-top:12px"><button class="btn primary" id="btnQuick">Save quick settings</button></div>
     </div>
@@ -222,6 +267,7 @@ $('#tabs').addEventListener('click', (e) => {
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('on', v.id === 'v-' + b.dataset.v));
   try { localStorage.setItem('panelTab', b.dataset.v); } catch {}
   if (b.dataset.v === 'trades') loadTrades();
+  if (b.dataset.v === 'analytics') loadAnalytics();
   if (b.dataset.v === 'settings') loadConfig();
 });
 try { const t = localStorage.getItem('panelTab'); if (t) document.querySelector(`.tabs button[data-v="${t}"]`)?.click(); } catch {}
@@ -237,6 +283,9 @@ function render(s) {
   $('#btnRun').className = 'btn ' + (s.running ? 'danger' : 'primary');
   $('#btnPause').textContent = s.paused ? 'Resume entries' : 'Pause entries';
   const halt = $('#halt'); halt.hidden = !s.risk.haltedReason; halt.textContent = s.risk.haltedReason ? 'Entries halted: ' + s.risk.haltedReason + '. Press "Resume entries" to override.' : '';
+  const rg = s.regime || { ok: true, reason: '' };
+  $('#regimeSt').textContent = rg.ok ? 'OK' : 'RISK-OFF'; $('#regimeSt').className = 'st ' + (rg.ok ? 'ok' : 'off'); $('#regimeWhy').textContent = rg.reason || '';
+  $('#feed').textContent = s.running ? (s.feedAgeSec > (s.config.loop.staleFeedAlertSec || 90) ? '· feed STALE ' + s.feedAgeSec + 's' : '· feed ' + s.feedAgeSec + 's ago') : '';
   const unreal = s.positions.reduce((a, p) => a + (p.unrealisedSol || 0), 0);
   $('#kBal').textContent = s.balanceSol.toFixed(4) + ' SOL'; $('#kBalUsd').textContent = s.solUsd ? '$' + (s.balanceSol * s.solUsd).toFixed(2) : '';
   $('#kDay').textContent = sol(s.risk.dailyPnlSol) + ' SOL'; $('#kDay').className = 'v ' + cls(s.risk.dailyPnlSol); $('#kDayS').textContent = s.risk.tradesToday + ' trades today';
@@ -248,14 +297,15 @@ function render(s) {
   renderPositions(s.positions);
   renderMarket(s.tracked);
   renderEngine(s);
+  renderChartSelect(s);
 }
 function renderPositions(ps) {
   const el = $('#positions');
   if (!ps.length) { el.innerHTML = '<div class="empty">No open positions. ' + (S.running ? 'Waiting for a signal that clears the buy threshold.' : 'Start the bot to begin.') + '</div>'; return; }
-  el.innerHTML = `<table><thead><tr><th>Token</th><th class="num">Gain</th><th class="num">Price</th><th class="num">Value</th><th class="num">Cost</th><th class="num">Unrealised</th><th class="num">High</th><th>TP</th><th class="num">Age</th><th></th></tr></thead><tbody>` +
+  el.innerHTML = `<table><thead><tr><th>Token</th><th class="num">Gain</th><th class="num">Price</th><th class="num">Value</th><th class="num">Cost</th><th class="num">Unrealised</th><th class="num">High</th><th class="num">Stop</th><th>TP</th><th class="num">Age</th><th></th></tr></thead><tbody>` +
     ps.map((p) => `<tr><td><span class="sym">${esc(p.symbol)}</span> <span class="mono m">${short(p.mint)}</span><div class="m" style="font-size:11px">${esc(p.strategy)}</div></td>
       <td class="num ${cls(p.gainPct)}"><b>${pct(p.gainPct)}</b></td><td class="num mono">$${fmt(p.priceUsd, 6)}</td><td class="num mono">${fmt(p.valueSol)}</td><td class="num mono">${p.costSol.toFixed(4)}</td>
-      <td class="num mono ${cls(p.unrealisedSol)}">${sol(p.unrealisedSol)}</td><td class="num mono">${pct(p.hwmPct)}</td><td>${p.ladderDone}/${p.ladderTotal}</td><td class="num">${p.ageMin}m</td>
+      <td class="num mono ${cls(p.unrealisedSol)}">${sol(p.unrealisedSol)}</td><td class="num mono">${pct(p.hwmPct)}</td><td class="num mono ${p.stopLevelPct > 0 ? 'g' : 'b'}" title="${p.stopLevelPct > 0 ? 'profit locked' : 'ATR-scaled stop'}">${pct(p.stopLevelPct, 1)}</td><td>${p.ladderDone}/${p.ladderTotal}</td><td class="num">${p.ageMin}m</td>
       <td><button class="btn small" data-close="${p.mint}" data-pct="50">Sell 50%</button> <button class="btn small danger" data-close="${p.mint}" data-pct="100">Close</button></td></tr>`).join('') + '</tbody></table>';
 }
 function renderMarket(ts) {
@@ -280,7 +330,10 @@ function renderEngine(s) {
     ['Loss streak', r.consecutiveLosses + (r.lastLossAt ? ' (last ' + ago(r.lastLossAt) + ')' : '')],
     ['Scanner', (c.scanner.enabled ? c.scanner.sources.length + ' sources, ' + c.scanner.interval : 'disabled') + ' · last ' + ago(s.lastScan)],
     ['Candles', c.loop.candleTimeframeSec + 's × ' + c.loop.maxCandles + ', warmup ' + c.loop.warmupCandles + ' · poll ' + c.loop.pollIntervalSec + 's'],
-    ['Execution', c.execution.engine + (s.mode === 'paper' ? ' (paper: ' + c.execution.paperSlippageBps + 'bps slippage)' : '')],
+    ['Execution', c.execution.engine + (s.mode === 'paper' ? ' (paper: ' + c.execution.paperSlippageBps + 'bps slippage)' : '') + ' · fast exits every ' + (c.loop.fastExitIntervalSec || 'off') + 's'],
+    ['Volatility', c.risk.volatility.enabled ? 'stop = ' + c.risk.volatility.stopAtrMultiple + ' × ATR (' + c.risk.volatility.minStopPct + '–' + c.risk.volatility.maxStopPct + '%), risk ' + c.risk.volatility.riskPerTradePct + '% per trade, lock ' + Math.round(c.risk.lockProfitFraction * 100) + '% of banked gains' : 'fixed stop ' + c.risk.stopLossPct + '%'],
+    ['Filters', (c.strategy.htf.enabled ? c.strategy.htf.multiplier + '× higher-timeframe trend' : 'no HTF filter') + ' · ' + (c.regime.enabled ? 'SOL regime' : 'no regime filter') + ' · sell-path ≤ ' + c.risk.maxRoundTripLossPct + '% loss'],
+    ['Execution quality', s.slippage && s.slippage.fills ? 'avg shortfall ' + s.slippage.overallPct.toFixed(2) + '% over ' + s.slippage.fills + ' fills' : 'no fills yet'],
   ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
 }
 
@@ -318,13 +371,14 @@ async function loadConfig() {
   try { const r = await api('config'); $('#cfgYaml').value = r.yaml; $('#cfgPath').textContent = r.path; const c = r.config;
     $('#qStrategy').value = c.strategy.name; $('#qMinBuy').value = c.strategy.minBuyScore; $('#qSize').value = c.risk.positionSizeSol; $('#qSizePct').value = c.risk.positionSizePct; $('#qMaxPos').value = c.risk.maxOpenPositions; $('#qExp').value = c.risk.maxExposureSol;
     $('#qStop').value = c.risk.stopLossPct; $('#qTrailAct').value = c.risk.trailingStop.activationPct; $('#qTrail').value = c.risk.trailingStop.trailPct; $('#qHold').value = c.risk.maxHoldMinutes; $('#qDaily').value = c.risk.maxDailyLossPct; $('#qTrades').value = c.risk.maxTradesPerDay;
+    $('#qVol').value = String(c.risk.volatility.enabled); $('#qAtrMult').value = c.risk.volatility.stopAtrMultiple; $('#qRiskPct').value = c.risk.volatility.riskPerTradePct; $('#qLock').value = c.risk.lockProfitFraction; $('#qHtf').value = String(c.strategy.htf.enabled); $('#qRegime').value = String(c.regime.enabled);
     $('#qScan').value = String(c.scanner.enabled); $('#qLiq').value = c.scanner.filters.minLiquidityUsd; $('#qHold2').value = c.scanner.filters.minHolders; $('#qOrg').value = c.scanner.filters.minOrganicScore; $('#qAge').value = c.scanner.filters.minAgeHours; $('#qCand').value = c.scanner.maxCandidates;
   } catch (e) { toast(e.message, 'bad'); }
 }
 $('#btnCfgReload').onclick = loadConfig;
 $('#btnCfg').onclick = () => act(() => api('config', { method: 'PUT', body: JSON.stringify({ yaml: $('#cfgYaml').value }) }).then((r) => { if (r.restartNeeded) toast('Saved. Candle timeframe changed: restart the bot to apply it.', 'good'); loadConfig(); return r; }), 'Configuration saved and applied');
 $('#btnQuick').onclick = () => { const n = (id) => Number($(id).value);
-  const patch = { strategy: { name: $('#qStrategy').value, minBuyScore: n('#qMinBuy') }, risk: { positionSizeSol: n('#qSize'), positionSizePct: n('#qSizePct'), maxOpenPositions: n('#qMaxPos'), maxExposureSol: n('#qExp'), stopLossPct: n('#qStop'), trailingStop: { activationPct: n('#qTrailAct'), trailPct: n('#qTrail') }, maxHoldMinutes: n('#qHold'), maxDailyLossPct: n('#qDaily'), maxTradesPerDay: n('#qTrades') }, scanner: { enabled: $('#qScan').value === 'true', maxCandidates: n('#qCand'), filters: { minLiquidityUsd: n('#qLiq'), minHolders: n('#qHold2'), minOrganicScore: n('#qOrg'), minAgeHours: n('#qAge') } } };
+  const patch = { strategy: { name: $('#qStrategy').value, minBuyScore: n('#qMinBuy'), htf: { enabled: $('#qHtf').value === 'true' } }, regime: { enabled: $('#qRegime').value === 'true' }, risk: { positionSizeSol: n('#qSize'), positionSizePct: n('#qSizePct'), maxOpenPositions: n('#qMaxPos'), maxExposureSol: n('#qExp'), stopLossPct: n('#qStop'), trailingStop: { activationPct: n('#qTrailAct'), trailPct: n('#qTrail') }, maxHoldMinutes: n('#qHold'), maxDailyLossPct: n('#qDaily'), maxTradesPerDay: n('#qTrades'), volatility: { enabled: $('#qVol').value === 'true', stopAtrMultiple: n('#qAtrMult'), riskPerTradePct: n('#qRiskPct') }, lockProfitFraction: n('#qLock') }, scanner: { enabled: $('#qScan').value === 'true', maxCandidates: n('#qCand'), filters: { minLiquidityUsd: n('#qLiq'), minHolders: n('#qHold2'), minOrganicScore: n('#qOrg'), minAgeHours: n('#qAge') } } };
   act(() => api('config', { method: 'PUT', body: JSON.stringify({ patch }) }).then((r) => { loadConfig(); return r; }), 'Settings saved and applied'); };
 
 /* ---------------- trades & equity ---------------- */
@@ -353,6 +407,98 @@ function drawLine(cv, ys, o = {}) {
   if (o.area) { const g = ctx.createLinearGradient(0, pad.t, 0, Hh - pad.b); g.addColorStop(0, color + '55'); g.addColorStop(1, color + '00'); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(x(0), y(o.zero ? 0 : lo)); ys.forEach((v, i) => ctx.lineTo(x(i), y(v))); ctx.lineTo(x(ys.length - 1), y(o.zero ? 0 : lo)); ctx.closePath(); ctx.fill(); }
   ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.beginPath(); ys.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)))); ctx.stroke();
   ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x(ys.length - 1), y(last), 3, 0, Math.PI * 2); ctx.fill();
+}
+
+/* ---------------- token chart ---------------- */
+let chartMint = '';
+function renderChartSelect(s) {
+  const sel = $('#chartMint');
+  const opts = [...s.positions.map((p) => ({ m: p.mint, l: p.symbol + ' (held)' })), ...s.tracked.filter((t) => !t.hasPosition).map((t) => ({ m: t.mint, l: t.symbol }))];
+  const cur = sel.value || chartMint || (opts[0] && opts[0].m);
+  if (sel.options.length !== opts.length || [...sel.options].some((o, i) => o.value !== opts[i].m)) {
+    sel.innerHTML = opts.map((o) => `<option value="${o.m}">${esc(o.l)}</option>`).join('');
+  }
+  if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  if (sel.value && sel.value !== chartMint) { chartMint = sel.value; loadChart(); }
+  else if (sel.value && (S.tickNo % 3 === 0)) loadChart();
+}
+$('#chartMint').addEventListener('change', () => { chartMint = $('#chartMint').value; loadChart(); });
+async function loadChart() {
+  if (!chartMint) return;
+  try {
+    const candles = await api('candles?mint=' + chartMint + '&limit=180');
+    const p = S.positions.find((x) => x.mint === chartMint);
+    const lines = [];
+    if (p && p.entryPriceUsd) {
+      const e = p.entryPriceUsd;
+      lines.push({ v: e, c: '#63B8D6', l: 'entry' });
+      lines.push({ v: e * (1 + p.stopLevelPct / 100), c: '#F0605D', l: 'stop ' + pct(p.stopLevelPct, 1) });
+      const ladder = S.config.risk.takeProfitLadder;
+      for (let i = p.ladderDone; i < ladder.length; i++) lines.push({ v: e * (1 + ladder[i].gainPct / 100), c: '#4BC672', l: 'TP' + (i + 1) + ' +' + ladder[i].gainPct + '%' });
+      const ts = S.config.risk.trailingStop;
+      if (ts.enabled && p.hwmPct >= ts.activationPct) lines.push({ v: e * (1 + p.hwmPct / 100) * (1 - ts.trailPct / 100), c: '#E8B84A', l: 'trail' });
+    }
+    const t = S.tracked.find((x) => x.mint === chartMint);
+    $('#chartInfo').textContent = (t ? t.symbol : short(chartMint)) + ' · ' + candles.length + ' × ' + S.config.loop.candleTimeframeSec + 's' + (p ? ' · ' + pct(p.gainPct) : '');
+    drawCandles($('#chart'), candles, lines);
+  } catch (e) { $('#chartInfo').textContent = e.message; }
+}
+function drawCandles(cv, candles, lines) {
+  const dpr = window.devicePixelRatio || 1; const W = cv.clientWidth || 600; const Hh = Number(cv.dataset.h) || 260;
+  cv.style.height = Hh + 'px'; cv.width = W * dpr; cv.height = Hh * dpr; const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr); ctx.clearRect(0, 0, W, Hh);
+  ctx.font = '11px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+  if (candles.length < 2) { ctx.fillStyle = '#5F6C79'; ctx.fillText('no candles yet', 10, Hh / 2); return; }
+  const pad = { l: 8, r: 66, t: 10, b: 18 };
+  const lastC = candles[candles.length - 1].c; const near = lines.filter((x) => x.v > lastC * 0.75 && x.v < lastC * 1.3); // keep far targets from flattening the candles
+  let lo = Math.min(...candles.map((c) => c.l), ...near.map((x) => x.v)); let hi = Math.max(...candles.map((c) => c.h), ...near.map((x) => x.v));
+  const m = (hi - lo) * 0.05 || hi * 0.01; lo -= m; hi += m;
+  const n = candles.length; const cw = (W - pad.l - pad.r) / n;
+  const x = (i) => pad.l + i * cw + cw / 2; const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (Hh - pad.t - pad.b);
+  ctx.strokeStyle = '#26303A'; ctx.fillStyle = '#8C98A4'; ctx.lineWidth = 1;
+  for (let k = 0; k <= 4; k++) { const v = lo + ((hi - lo) * k) / 4; ctx.beginPath(); ctx.moveTo(pad.l, y(v)); ctx.lineTo(W - pad.r, y(v)); ctx.stroke(); ctx.fillText('$' + fmt(v, 6), W - pad.r + 4, y(v) + 4); }
+  candles.forEach((c, i) => { const up = c.c >= c.o; ctx.strokeStyle = ctx.fillStyle = up ? '#4BC672' : '#F0605D'; ctx.beginPath(); ctx.moveTo(x(i), y(c.h)); ctx.lineTo(x(i), y(c.l)); ctx.stroke(); const bw = Math.max(1, cw * 0.6); const top = y(Math.max(c.o, c.c)); const h = Math.max(1, Math.abs(y(c.o) - y(c.c))); ctx.fillRect(x(i) - bw / 2, top, bw, h); });
+  for (const ln of lines) { if (ln.v < lo || ln.v > hi) continue; ctx.strokeStyle = ln.c; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(pad.l, y(ln.v)); ctx.lineTo(W - pad.r, y(ln.v)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = ln.c; ctx.fillText(ln.l, pad.l + 4, y(ln.v) - 3); }
+  const t0 = new Date(candles[0].t), t1 = new Date(candles[n - 1].t); ctx.fillStyle = '#5F6C79';
+  ctx.fillText(t0.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), pad.l, Hh - 4); ctx.fillText(t1.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), W - pad.r - 34, Hh - 4);
+}
+
+/* ---------------- analytics ---------------- */
+async function loadAnalytics() {
+  try {
+    const a = await api('analytics');
+    const tbl = (rows, label) => rows.length ? `<table><thead><tr><th>${label}</th><th class="num">Exits</th><th class="num">Win %</th><th class="num">PnL SOL</th><th class="num">Avg %</th></tr></thead><tbody>` + rows.map((r) => `<tr><td>${esc(r.key)}</td><td class="num">${r.trades}</td><td class="num">${r.trades ? Math.round((r.wins / r.trades) * 100) : 0}%</td><td class="num mono ${cls(r.pnlSol)}">${sol(r.pnlSol)}</td><td class="num ${cls(r.avgPnlPct)}">${pct(r.avgPnlPct)}</td></tr>`).join('') + '</tbody></table>' : '<div class="empty">No exits yet.</div>';
+    $('#anaStrategy').innerHTML = tbl(a.byStrategy, 'Strategy'); $('#anaExit').innerHTML = tbl(a.byExitKind, 'Exit'); $('#anaToken').innerHTML = tbl(a.byToken, 'Token'); $('#anaHour').innerHTML = tbl(a.byHour, 'Hour');
+    const all = a.byStrategy.reduce((o, r) => ({ trades: o.trades + r.trades, wins: o.wins + r.wins, pnl: o.pnl + r.pnlSol }), { trades: 0, wins: 0, pnl: 0 });
+    const best = a.byToken[0]; const worst = a.byToken[a.byToken.length - 1];
+    $('#anaKpis').innerHTML = [['Exits', all.trades, ''], ['Win rate', all.trades ? Math.round((all.wins / all.trades) * 100) + '%' : '–', all.wins + ' winners'], ['Realised', sol(all.pnl) + ' SOL', ''], ['Best token', best ? best.key : '–', best ? sol(best.pnlSol) + ' SOL' : ''], ['Worst token', worst ? worst.key : '–', worst ? sol(worst.pnlSol) + ' SOL' : ''], ['Avg shortfall', a.slippage.fills ? a.slippage.overallPct.toFixed(2) + '%' : '–', a.slippage.fills + ' fills measured']].map(([l, v, s2]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s2}</div></div>`).join('');
+    const sl = Object.entries(a.slippage.byMint).sort((x, y) => y[1].avgPct - x[1].avgPct);
+    $('#anaSlip').innerHTML = sl.length ? `<table><thead><tr><th>Token</th><th class="num">Fills</th><th class="num">Avg shortfall</th></tr></thead><tbody>` + sl.map(([m, r]) => `<tr><td><span class="sym">${esc(r.symbol)}</span> <span class="mono m">${short(m)}</span></td><td class="num">${r.fills}</td><td class="num ${r.avgPct > (S?.config.risk.autoBlacklist.maxAvgSlippagePct || 3) ? 'b' : r.avgPct > 1 ? 'w' : 'g'}">${r.avgPct.toFixed(2)}%</td></tr>`).join('') + '</tbody></table>' : '<div class="empty">No fills measured yet. Every buy and sell compares the quote with the real fill.</div>';
+    const bl = S?.autoBlacklist || [];
+    $('#blSum').textContent = bl.length + ' token(s)';
+    $('#anaBl').innerHTML = bl.length ? bl.map((m) => `<div class="row" style="margin-bottom:6px"><span class="mono">${m}</span><button class="btn small" data-unbl="${m}">Allow again</button></div>`).join('') + `<button class="btn small" data-unbl="*">Clear all</button>` : '<div class="empty">Nothing blacklisted. Tokens that fail the sell-path check or fill far worse than quoted land here automatically.</div>';
+  } catch (e) { toast(e.message, 'bad'); }
+}
+document.body.addEventListener('click', (e) => { const b = e.target.closest('button[data-unbl]'); if (!b) return; act(() => api('blacklist' + (b.dataset.unbl === '*' ? '' : '?mint=' + b.dataset.unbl), { method: 'DELETE' }), 'Blacklist updated').then(loadAnalytics); });
+
+/* ---------------- tuner ---------------- */
+let tunePoll;
+$('#btnTune').onclick = async () => {
+  const mints = $('#tuneMints').value.split(/[\s,]+/).filter(Boolean);
+  if (!mints.length) return toast('paste at least one mint address', 'bad');
+  try { await post('tune', { mints, strategy: $('#tuneStrat').value, maxCombos: Number($('#tuneCombos').value) }); $('#tuneOut').innerHTML = '<span class="m">fetching history and testing combinations…</span>'; $('#tuneProg').hidden = false; pollTune(); } catch (e) { toast(e.message, 'bad'); }
+};
+async function pollTune() {
+  clearTimeout(tunePoll);
+  try {
+    const j = await api('tune');
+    if (j.status === 'running') { $('#tuneProg').querySelector('i').style.width = Math.round((j.progress / Math.max(1, j.total)) * 100) + '%'; tunePoll = setTimeout(pollTune, 1500); return; }
+    $('#tuneProg').hidden = true;
+    if (j.status === 'error') { $('#tuneOut').innerHTML = '<span class="b">' + esc(j.error) + '</span>'; return; }
+    if (j.status !== 'done') return;
+    const r = j.result; const row = (c, name) => `<tr><td>${name}</td><td class="mono" style="white-space:normal">${esc(JSON.stringify(c.params))}</td><td class="num ${cls(c.train.returnPct)}">${pct(c.train.returnPct)} <span class="m">(${c.train.trades})</span></td><td class="num ${cls(c.test.returnPct)}">${pct(c.test.returnPct)} <span class="m">(${c.test.trades})</span></td><td class="num">${c.test.maxDrawdownPct.toFixed(1)}%</td><td class="num mono">${Number.isFinite(c.score) ? c.score.toFixed(2) : 'n/a'}</td></tr>`;
+    $('#tuneOut').innerHTML = `<p class="m" style="margin:0 0 8px">${r.combosTried} combinations on ${r.candleSets} token(s) in ${(r.elapsedMs / 1000).toFixed(0)}s · ${r.best ? 'a better set was found' : 'nothing beat the current settings out of sample'}</p><div class="tbl"><table><thead><tr><th></th><th>Parameters</th><th class="num">Train</th><th class="num">Test</th><th class="num">Test DD</th><th class="num">Score</th></tr></thead><tbody>${row(r.baseline, 'current')}${r.top.slice(0, 6).map((c, i) => row(c, '#' + (i + 1))).join('')}</tbody></table></div>` + (r.best ? `<div class="row" style="margin-top:10px"><button class="btn primary" id="btnTuneApply">Apply best to config</button></div>` : '');
+    const b = $('#btnTuneApply'); if (b) b.onclick = () => act(() => api('config', { method: 'PUT', body: JSON.stringify({ patch: r.patch }) }).then((x) => { loadConfig(); return x; }), 'Tuned parameters applied');
+  } catch (e) { $('#tuneOut').innerHTML = '<span class="b">' + esc(e.message) + '</span>'; }
 }
 
 /* ---------------- logs ---------------- */

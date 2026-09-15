@@ -7,8 +7,9 @@ process.on('warning', (w) => {
   console.warn(`${w.name}: ${w.message}`);
 });
 import { parseArgs } from 'node:util';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { PublicKey } from '@solana/web3.js';
 import { TokenScanner } from './analysis/scanner.js';
 import { parseCandlesCsv, runBacktest } from './backtest/engine.js';
@@ -27,7 +28,10 @@ import { PositionManager } from './trading/positions.js';
 import { PanelServer } from './server/panel.js';
 import { RiskManager, type RiskState } from './trading/risk.js';
 import { fmtNum, fmtPct, fromRaw, SOL_MINT } from './utils.js';
-import { generateWallet, loadKeypair } from './wallet.js';
+import { decryptSecret, encryptSecret, generateWallet, keypairToBase58, loadKeypair, type EncryptedKey } from './wallet.js';
+import { tune } from './backtest/tuner.js';
+import { TelegramCommandLoop } from './notify/commands.js';
+import { fmtPct as fmtP } from './utils.js';
 
 const log = createLogger('cli');
 
@@ -44,7 +48,9 @@ Usage:
   phantom-bot buy <mint> <sol>                                Manual buy (respects --mode)
   phantom-bot sell <mint> [--pct 100]                         Manual sell
   phantom-bot wallet new [--save path.json]                   Generate a dedicated bot wallet
+  phantom-bot wallet encrypt                                  Store PRIVATE_KEY encrypted in data/wallet.enc (password protected)
   phantom-bot backtest (--mint <mint> | --file candles.csv) [--strategy composite] [--timeframe 60] [--limit 1000]
+  phantom-bot tune --mint <a> [--mint <b> ...] [--strategy x] [--apply]   Walk-forward parameter search (out-of-sample ranked)
 
 Options:
   --mode      paper (default, simulated) or live (real transactions; needs I_UNDERSTAND_THE_RISKS=yes)
@@ -63,7 +69,9 @@ async function main() {
       log: { type: 'string' },
       save: { type: 'string' },
       pct: { type: 'string' },
-      mint: { type: 'string' },
+      mint: { type: 'string', multiple: true },
+      apply: { type: 'boolean' },
+      combos: { type: 'string' },
       file: { type: 'string' },
       strategy: { type: 'string' },
       timeframe: { type: 'string' },
@@ -102,7 +110,9 @@ async function main() {
     case 'wallet':
       return wallet(positionals[1], values.save);
     case 'backtest':
-      return backtest(cfg, env, values);
+      return backtest(cfg, env, values as Record<string, string | boolean | string[] | undefined>);
+    case 'tune':
+      return tuneCmd(cfg, env, values as Record<string, string | boolean | string[] | undefined>);
     default:
       console.log(HELP);
       throw new Error(`Unknown command: ${cmd}`);
@@ -132,12 +142,35 @@ function buildCtx(cfg: BotConfig, env: EnvConfig): Ctx {
   return { cfg, env, rpc, jup, dex, gecko, scanner, store };
 }
 
-function walletFromEnv(env: EnvConfig, required: boolean) {
-  if (!env.privateKey) {
-    if (required) throw new Error('PRIVATE_KEY is not set. Export it from Phantom (Settings -> Manage Accounts -> Show Private Key) or run `npm run wallet:new`.');
-    return undefined;
+const ENC_PATH = () => resolve(process.cwd(), 'data/wallet.enc');
+
+async function askHidden(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  const out = process.stdout;
+  return new Promise((res) => {
+    const origWrite = out.write.bind(out);
+    let muted = false;
+    (out as unknown as { write: typeof origWrite }).write = ((chunk: string | Uint8Array, ...rest: unknown[]) => (muted ? true : (origWrite as (...a: unknown[]) => boolean)(chunk, ...rest))) as typeof origWrite;
+    rl.question(question, (answer) => {
+      (out as unknown as { write: typeof origWrite }).write = origWrite;
+      rl.close();
+      process.stdout.write('\n');
+      res(answer);
+    });
+    muted = true;
+  });
+}
+
+async function walletFromEnv(env: EnvConfig, required: boolean) {
+  if (env.privateKey) return loadKeypair(env.privateKey);
+  if (existsSync(ENC_PATH())) {
+    const enc = JSON.parse(readFileSync(ENC_PATH(), 'utf8')) as EncryptedKey;
+    const pw = process.env.WALLET_PASSWORD || (process.stdin.isTTY ? await askHidden('Wallet password: ') : '');
+    if (!pw) throw new Error('data/wallet.enc found but no password given (set WALLET_PASSWORD or run interactively)');
+    return loadKeypair(decryptSecret(enc, pw));
   }
-  return loadKeypair(env.privateKey);
+  if (required) throw new Error('PRIVATE_KEY is not set. Export it from Phantom (Settings -> Manage Accounts -> Show Private Key), run `npm run wallet:new`, or `npm run wallet:encrypt`.');
+  return undefined;
 }
 
 function assertLiveAllowed(env: EnvConfig) {
@@ -146,9 +179,9 @@ function assertLiveAllowed(env: EnvConfig) {
   }
 }
 
-function buildExecutor(ctx: Ctx, priceSolPerRaw: (mint: string) => number | undefined): { executor: Executor; address: string } {
+async function buildExecutor(ctx: Ctx, priceSolPerRaw: (mint: string) => number | undefined): Promise<{ executor: Executor; address: string }> {
   const { env, cfg, rpc, jup, store } = ctx;
-  const kp = walletFromEnv(env, env.mode === 'live');
+  const kp = await walletFromEnv(env, env.mode === 'live');
   if (env.mode === 'live') {
     assertLiveAllowed(env);
     return { executor: new LiveExecutor(rpc, jup, kp!, cfg.execution), address: kp!.publicKey.toBase58() };
@@ -164,7 +197,7 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
   const ctx = buildCtx(cfg, env);
   const risk = new RiskManager(cfg.risk, ctx.store.getJson<RiskState>('risk'), (s) => ctx.store.setJson('risk', s));
   let bot: TradingBot;
-  const { executor, address } = buildExecutor(ctx, (mint) => {
+  const { executor, address } = await buildExecutor(ctx, (mint) => {
     const d = bot.decimalsOf(mint);
     return d === undefined ? undefined : bot.priceSolPerRaw(mint, d);
   });
@@ -193,9 +226,35 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
       log.warn('PANEL_HOST exposes the panel to the network without PANEL_TOKEN - anyone who can reach it can trade with your wallet');
     }
   }
+  let commands: TelegramCommandLoop | undefined;
+  if (cfg.telegram.commands && env.telegramToken && env.telegramChatId) {
+    commands = new TelegramCommandLoop(env.telegramToken, env.telegramChatId, {
+      status: () => {
+        const s = bot.snapshot();
+        return `${s.running ? (s.paused ? '⏸ running, entries paused' : '▶ running') : '⏹ stopped'} (${s.mode})\nBalance ${s.balanceSol.toFixed(4)} SOL | SOL $${s.solUsd.toFixed(2)}\nToday ${s.risk.dailyPnlSol >= 0 ? '+' : ''}${s.risk.dailyPnlSol.toFixed(4)} SOL, ${s.risk.tradesToday} trades | all-time ${s.stats.pnlSol >= 0 ? '+' : ''}${s.stats.pnlSol.toFixed(4)} SOL\nOpen ${s.positions.length}/${s.config.risk.maxOpenPositions}, tracking ${s.tracked.length}\nRegime: ${s.regime.ok ? 'OK' : 'RISK-OFF'} - ${s.regime.reason}` + (s.risk.haltedReason ? `\nHALTED: ${s.risk.haltedReason}` : '');
+      },
+      positions: () => {
+        const ps = bot.snapshot().positions;
+        return ps.length ? ps.map((p) => `${p.symbol}: ${fmtP(p.gainPct)} | cost ${p.costSol.toFixed(3)} SOL | stop ${fmtP(p.stopLevelPct)} | TP ${p.ladderDone}/${p.ladderTotal} | ${p.ageMin}m`).join('\n') : 'no open positions';
+      },
+      pause: () => (bot.pause(), 'entries paused'),
+      resume: () => (bot.resume(), 'entries resumed'),
+      scan: () => (void bot.scanNow(), 'scan started'),
+      close: async (target, pct) => {
+        const p = bot.snapshot().positions.find((x) => x.symbol.toLowerCase() === target.toLowerCase() || x.mint === target);
+        if (!p) return `no open position matching ${target}`;
+        await bot.closePosition(p.mint, pct);
+        return `sold ${pct}% of ${p.symbol}`;
+      },
+      stop: () => (bot.stop(), 'stopping trading loop'),
+      start: () => (void bot.start(), 'starting trading loop'),
+    });
+    commands.start();
+  }
   const shutdown = async () => {
     log.info('shutting down...');
     bot.stop();
+    commands?.stop();
     panel?.close();
     await notifier.send('🛑 Bot stopped');
     ctx.store.close();
@@ -245,7 +304,7 @@ async function check(cfg: BotConfig, env: EnvConfig, mint?: string) {
 
 async function balance(cfg: BotConfig, env: EnvConfig) {
   const ctx = buildCtx(cfg, env);
-  const kp = walletFromEnv(env, true)!;
+  const kp = (await walletFromEnv(env, true))!;
   const sol = await ctx.rpc.getSolBalance(kp.publicKey);
   console.log(`\nWallet ${kp.publicKey.toBase58()}\nSOL: ${sol.toFixed(6)}`);
   try {
@@ -300,7 +359,7 @@ async function manualBuy(cfg: BotConfig, env: EnvConfig, mint?: string, sol?: nu
   const decimals = r.meta?.decimals ?? (await ctx.rpc.getMintInfo(mint)).decimals;
   const solUsd = (await ctx.jup.getPrices([SOL_MINT]))[SOL_MINT]?.usdPrice ?? 0;
   const usd = r.meta?.usdPrice ?? r.pair?.priceUsd ?? 0;
-  const { executor } = buildExecutor(ctx, () => (usd && solUsd ? usd / solUsd / 10 ** decimals : undefined));
+  const { executor } = await buildExecutor(ctx, () => (usd && solUsd ? usd / solUsd / 10 ** decimals : undefined));
   if (!r.safety.ok) log.warn(`safety check FAILED: ${[...r.safety.hardFail, ...r.safety.reasons].join('; ')} - proceeding because this is a manual order`);
   const fill = await executor.buy(mint, decimals, sol);
   const spent = fromRaw(fill.inputAmountRaw, 9) + fill.feeSol;
@@ -324,7 +383,7 @@ async function manualSell(cfg: BotConfig, env: EnvConfig, mint?: string, pctToSe
   const decimals = pos?.decimals ?? (await ctx.rpc.getMintInfo(mint)).decimals;
   const solUsd = (await ctx.jup.getPrices([SOL_MINT]))[SOL_MINT]?.usdPrice ?? 0;
   const usd = (await ctx.jup.getPrices([mint]))[mint]?.usdPrice ?? 0;
-  const { executor } = buildExecutor(ctx, () => (usd && solUsd ? usd / solUsd / 10 ** decimals : undefined));
+  const { executor } = await buildExecutor(ctx, () => (usd && solUsd ? usd / solUsd / 10 ** decimals : undefined));
   const held = await executor.tokenBalance(mint);
   const amount = pctToSell >= 100 ? held : (held * BigInt(Math.round(pctToSell * 100))) / 10000n;
   if (amount <= 0n) throw new Error('nothing to sell');
@@ -349,7 +408,23 @@ async function manualSell(cfg: BotConfig, env: EnvConfig, mint?: string, pctToSe
 }
 
 async function wallet(sub?: string, save?: string) {
-  if (sub !== 'new') throw new Error('usage: wallet new [--save path.json]');
+  if (sub === 'encrypt') {
+    const env = loadEnv();
+    let secret = env.privateKey;
+    if (!secret) {
+      if (!process.stdin.isTTY) throw new Error('set PRIVATE_KEY in .env (or the environment) before running wallet encrypt');
+      secret = await askHidden('Private key (base58, from Phantom): ');
+    }
+    const kp = loadKeypair(secret);
+    const pw = await askHidden('Choose a password (8+ chars): ');
+    const pw2 = await askHidden('Repeat password: ');
+    if (pw !== pw2) throw new Error('passwords do not match');
+    writeFileSync(ENC_PATH(), JSON.stringify(encryptSecret(keypairToBase58(kp), pw), null, 2), { mode: 0o600 });
+    console.log(`\nEncrypted key for ${kp.publicKey.toBase58()} written to data/wallet.enc.`);
+    console.log('Now remove PRIVATE_KEY from .env. The bot will ask for the password at start (or read WALLET_PASSWORD).');
+    return;
+  }
+  if (sub !== 'new') throw new Error('usage: wallet new [--save path.json] | wallet encrypt');
   const w = generateWallet();
   console.log('\nNew bot wallet generated.\n');
   console.log(`Public address : ${w.keypair.publicKey.toBase58()}`);
@@ -363,7 +438,7 @@ async function wallet(sub?: string, save?: string) {
   }
 }
 
-async function backtest(cfg: BotConfig, env: EnvConfig, v: Record<string, string | boolean | undefined>) {
+async function backtest(cfg: BotConfig, env: EnvConfig, v: Record<string, string | boolean | string[] | undefined>) {
   const strategyName = (v.strategy as BotConfig['strategy']['name']) || cfg.strategy.name;
   const strategy = createStrategy(strategyName);
   const tf = Number(v.timeframe || cfg.loop.candleTimeframeSec);
@@ -374,11 +449,10 @@ async function backtest(cfg: BotConfig, env: EnvConfig, v: Record<string, string
     label = String(v.file);
   } else if (v.mint) {
     const ctx = buildCtx(cfg, env);
-    const pairs = await ctx.dex.getTokenPairs(String(v.mint));
-    const pair = bestPair(pairs, String(v.mint));
-    if (!pair) throw new Error('no DexScreener pool found for that mint');
-    candles = await ctx.gecko.getOhlcv(pair.pairAddress, tf, Number(v.limit || 1000));
-    label = `${pair.baseToken.symbol} (${pair.dexId} ${pair.pairAddress})`;
+    const mint = Array.isArray(v.mint) ? v.mint[0] : String(v.mint);
+    const r = await loadCandlesForMint(ctx, mint, tf, Number(v.limit || 1000));
+    candles = r.candles;
+    label = `${r.pair.baseToken.symbol} (${r.pair.dexId} ${r.pair.pairAddress})`;
     ctx.store.close();
   } else throw new Error('backtest needs --mint <mint> or --file candles.csv');
   if (candles.length < cfg.loop.warmupCandles + 10) throw new Error(`only ${candles.length} candles; need more history`);
@@ -395,6 +469,75 @@ async function backtest(cfg: BotConfig, env: EnvConfig, v: Record<string, string
     for (const t of r.trades.slice(-12)) console.log(`  ${new Date(t.entryTs).toISOString().slice(0, 16)} -> ${new Date(t.exitTs).toISOString().slice(0, 16)}  ${fmtPct(t.pnlPct).padStart(8)}  ${t.bars} bars  ${t.reason.slice(0, 70)}`);
   }
   console.log('\nNote: backtests ignore liquidity, latency and MEV. Treat results as an upper bound.');
+}
+
+async function loadCandlesForMint(ctx: Ctx, mint: string, tf: number, limit: number) {
+  const pairs = await ctx.dex.getTokenPairs(mint);
+  const pair = bestPair(pairs, mint);
+  if (!pair) throw new Error(`no DexScreener pool found for ${mint}`);
+  const candles = await ctx.gecko.getOhlcv(pair.pairAddress, tf, limit);
+  return { pair, candles };
+}
+
+async function tuneCmd(cfg: BotConfig, env: EnvConfig, v: Record<string, string | boolean | string[] | undefined>) {
+  const mints = Array.isArray(v.mint) ? v.mint : v.mint ? [String(v.mint)] : [];
+  const files = v.file ? [String(v.file)] : [];
+  if (!mints.length && !files.length) throw new Error('tune needs --mint <mint> (repeatable) or --file candles.csv');
+  const tf = Number(v.timeframe || cfg.loop.candleTimeframeSec);
+  const sets = [];
+  const labels: string[] = [];
+  for (const f of files) {
+    sets.push(parseCandlesCsv(readFileSync(f, 'utf8')));
+    labels.push(f);
+  }
+  if (mints.length) {
+    const ctx = buildCtx(cfg, env);
+    for (const m of mints) {
+      const { pair, candles } = await loadCandlesForMint(ctx, m, tf, Number(v.limit || 1000));
+      sets.push(candles);
+      labels.push(`${pair.baseToken.symbol} (${candles.length} candles)`);
+    }
+    ctx.store.close();
+  }
+  console.log(`\nTuning ${v.strategy || cfg.strategy.name} on ${labels.join(', ')} ...`);
+  let lastPct = -1;
+  const r = await tune(sets, cfg, {
+    strategy: (v.strategy as BotConfig['strategy']['name']) || undefined,
+    maxCombos: v.combos ? Number(v.combos) : undefined,
+    onProgress: (d, t) => {
+      const pct = Math.floor((d / t) * 10) * 10;
+      if (pct !== lastPct) {
+        lastPct = pct;
+        process.stdout.write(`\r  ${pct}% (${d}/${t})`);
+      }
+    },
+  });
+  console.log(`\n\n${r.combosTried} combinations in ${(r.elapsedMs / 1000).toFixed(0)}s, ranked by out-of-sample (last ${Math.round((1 - r.trainFraction) * 100)}%) return minus half the drawdown.`);
+  const row = (c: typeof r.baseline, name: string) => console.log(`  ${name.padEnd(9)} train ${fmtP(c.train.returnPct).padStart(8)} (${c.train.trades} trades)   test ${fmtP(c.test.returnPct).padStart(8)} (${c.test.trades} trades, dd ${c.test.maxDrawdownPct.toFixed(1)}%)   score ${Number.isFinite(c.score) ? c.score.toFixed(2) : 'n/a'}`);
+  row(r.baseline, 'current');
+  r.top.slice(0, 5).forEach((c, i) => row(c, `#${i + 1}`));
+  if (!r.best) {
+    console.log('\nNo parameter set beat the current configuration out of sample. Keeping current settings.');
+    return;
+  }
+  console.log(`\nBest: ${JSON.stringify(r.best.params)}`);
+  if (v.apply) {
+    const yaml = await import('yaml');
+    const path = env.configPath;
+    const current = existsSync(path) ? (yaml.parse(readFileSync(path, 'utf8')) ?? {}) : {};
+    const merged = deepMergeObj(current as Record<string, unknown>, r.patch ?? {});
+    writeFileSync(path, yaml.stringify(merged));
+    console.log(`Applied to ${path}. Restart the bot (or save in the panel) to use it.`);
+  } else console.log('Run again with --apply to write these into config.yaml, or paste them under Settings in the panel.');
+}
+
+function deepMergeObj(a: Record<string, unknown>, b: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...a };
+  for (const [k, v] of Object.entries(b)) {
+    const cur = out[k];
+    out[k] = v && typeof v === 'object' && !Array.isArray(v) && cur && typeof cur === 'object' && !Array.isArray(cur) ? deepMergeObj(cur as Record<string, unknown>, v as Record<string, unknown>) : v;
+  }
+  return out;
 }
 
 main().catch((e) => {

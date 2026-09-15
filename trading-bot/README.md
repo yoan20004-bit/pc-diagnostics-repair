@@ -42,11 +42,12 @@ The bot serves a dashboard while it runs (`npm run panel`, `start.bat`, or plain
 
 | Tab | What you can do |
 |---|---|
-| Overview | Balance, daily and all-time PnL, open positions with live gain / high-water mark / take-profit progress, one-click **Sell 50%** / **Close**, realised-PnL chart, engine summary |
+| Overview | Market-regime status, balance, daily and all-time PnL, open positions with live gain / stop level / take-profit progress, one-click **Sell 50%** / **Close**, candle chart with entry/stop/TP/trailing lines, realised-PnL chart, engine summary |
 | Market | Every tracked token with live signal (action + confidence + reasons), price, 1h/24h change, liquidity, market cap, volume, holders, organic score, safety score, buy/sell flow; **Buy** or stop tracking |
 | Trades | Full trade history with PnL, fees and Solscan links |
+| Analytics | PnL by strategy, exit reason, token and hour; execution quality (quote vs fill) per token; auto-blacklist management |
 | Logs | Live streaming log with buy/sell highlights |
-| Tools | Check any token's safety report, place a manual buy, add a token to the watchlist, run a backtest with an equity chart |
+| Tools | Check any token's safety report, place a manual buy, add a token to the watchlist, run a backtest with an equity chart, run the walk-forward parameter tuner and apply its result |
 | Settings | Quick settings for strategy, sizing, exits, limits and scanner filters (applied instantly), plus the full YAML config with validation |
 
 Top bar: **Start / Stop** the trading loop, **Pause entries** (exits are still managed),
@@ -56,6 +57,23 @@ The panel binds to `127.0.0.1` only. To open it from your phone on the same Wi-F
 `PANEL_HOST=0.0.0.0` **and** `PANEL_TOKEN=<long random secret>` in `.env`, then browse to
 `http://<pc-ip>:8787/?token=<secret>`. Anyone who can reach the panel can trade with the
 wallet, so never expose it without a token, and use a VPN or SSH tunnel for remote access.
+
+## What makes it good
+
+| Upgrade | Why it matters |
+|---|---|
+| **ATR-scaled stops and risk-based sizing** | Each position gets its own stop from current volatility (2.5 × ATR, clamped 4–15%), and the size is capped so a stop-out costs at most `riskPerTradePct` of the balance. Calm tokens get bigger positions, wild ones smaller with wider stops. |
+| **Profit-lock stops** | After each take-profit rung the stop moves to half of the banked gain instead of only breakeven, so a winner cannot turn into a loser. |
+| **Higher-timeframe confirmation** | Buys are only allowed when the 5× candle trend (fast EMA above slow) agrees with the 1-minute signal. Cuts most fake breakouts. Used by the live bot and the backtester alike. |
+| **SOL market-regime filter** | No new entries while SOL is below its higher-timeframe EMA or has dropped more than 4% in the last hour. Memecoins rarely rally against a falling SOL. Exits are always managed. |
+| **Sell-path verification** | Before every buy the bot quotes the round trip (buy, then sell what it would receive). More than `maxRoundTripLossPct` lost means transfer tax or an unsellable token: skipped and auto-blacklisted. |
+| **Execution-quality tracking** | Every fill is compared with its quote. Average shortfall per token shows on the Analytics tab, and tokens that consistently fill worse than `autoBlacklist.maxAvgSlippagePct` are blacklisted automatically. |
+| **Fast exit loop** | Held tokens are re-priced every 4 s (configurable) on top of the main 15 s loop, so stops and trailing exits fire on the move. |
+| **Walk-forward tuner** | `npm run tune -- --mint <a> --mint <b>` (or the panel) searches EMA/RSI/stop/trail/score combinations, ranks them only on the 30% of history they never trained on, and applies the winner with `--apply`. |
+| **Feed watchdog + supervisor** | Alerts (log + Telegram) when prices stop arriving; `npm run supervise` restarts the bot if it ever crashes. `/api/health` for external monitors. |
+| **Two-way Telegram** | `/status`, `/positions`, `/pause`, `/resume`, `/scan`, `/close SYMBOL [pct]`, `/stop`, `/start` from the configured chat only. |
+| **Encrypted key storage** | `npm run wallet:encrypt` stores the key as `data/wallet.enc` (scrypt + AES-256-GCM); the bot asks for the password at start or reads `WALLET_PASSWORD`. `PRIVATE_KEY` can then be removed from `.env`. |
+| **Charts and analytics on the panel** | Candle chart per token with entry, stop, take-profit and trailing lines; PnL by strategy, exit reason, token and hour. |
 
 ## Features
 
@@ -144,6 +162,8 @@ Every key has a sane default, so you can delete what you do not care about.
 | Key | Meaning |
 |---|---|
 | `pollIntervalSec` | price refresh + exit checks (default 15 s) |
+| `fastExitIntervalSec` | extra price checks for held tokens only (default 4 s, 0 = off) |
+| `staleFeedAlertSec` | alert when no price has arrived for this long |
 | `scanIntervalSec` | how often the scanner looks for new tokens (default 180 s) |
 | `candleTimeframeSec` | candle size for indicators (default 60 s) |
 | `warmupCandles` | minimum history before a strategy may fire (bootstrapped from GeckoTerminal) |
@@ -162,13 +182,22 @@ tighten them for blue-chip only.
 `name` picks the strategy; `minBuyScore` / `minSellScore` set how confident a signal must
 be (0..1). `params` holds indicator periods and the composite weights.
 
+### Filters (`strategy.htf`, `regime`)
+`strategy.htf` gates buys on the higher-timeframe trend (`multiplier` base candles per bar,
+`emaFast` / `emaSlow`). `regime` blocks entries when SOL is weak (`solEmaPeriod` on the
+higher timeframe, `maxSolDrop1hPct`). Both default on.
+
 ### Risk
 | Key | Meaning |
 |---|---|
 | `positionSizeSol` / `positionSizePct` | SOL per entry: the smaller of the two |
+| `volatility` | `enabled`, `atrPeriod`, `stopAtrMultiple`, `minStopPct` / `maxStopPct`, `riskPerTradePct`: ATR-scaled stop per position and risk-based size cap |
+| `lockProfitFraction` | after a take-profit rung the stop moves to rung gain × this (0 = breakeven) |
+| `maxRoundTripLossPct` | sell-path check threshold on every buy |
+| `autoBlacklist` | `minFills`, `maxAvgSlippagePct`: blacklist tokens that fill far worse than quoted |
 | `maxOpenPositions`, `maxExposureSol` | concurrency and total capital at risk |
 | `minSolReserve` | never spend below this (fees, rent) |
-| `stopLossPct` | hard stop from entry; becomes a breakeven stop after the first take-profit rung |
+| `stopLossPct` | fallback stop when volatility sizing is off (or no ATR yet) |
 | `takeProfitLadder` | list of `{gainPct, sellPct}`; `sellPct` is the share of the *remaining* position; last rung must be 100 |
 | `trailingStop` | activates once the position is up `activationPct`; exits `trailPct` below the high |
 | `maxHoldMinutes` | time-based exit |
@@ -198,6 +227,9 @@ npx tsx src/index.ts buy <mint> <sol>          manual entry; the running bot man
 npx tsx src/index.ts sell <mint> [--pct 50]    manual exit
 npm run backtest -- --mint <mint> [--strategy momentum] [--timeframe 60] [--limit 1000]
 npm run backtest -- --file candles.csv         CSV columns: time,open,high,low,close,volume
+npm run tune -- --mint <a> --mint <b> [--strategy momentum] [--combos 200] [--apply]
+npm run wallet:encrypt                         encrypt PRIVATE_KEY into data/wallet.enc
+npm run supervise                              run the bot under an auto-restarting supervisor
 ```
 
 All commands accept `--mode paper|live`, `--config path`, `--log debug`.
@@ -228,6 +260,7 @@ All commands accept `--mode paper|live`, `--config path`, `--log debug`.
 ## Security checklist
 
 - Use a **dedicated bot wallet** with a small balance. Never the account that holds your savings.
+- Prefer `npm run wallet:encrypt` over a plain-text `PRIVATE_KEY`; the bot then asks for the password at start.
 - `.env` is git-ignored. Never paste your key into chats, issues or screenshots.
 - Prefer a machine you control (VPS or your own PC), not shared hosting.
 - Live mode is refused unless `I_UNDERSTAND_THE_RISKS=yes`.
@@ -264,12 +297,14 @@ src/
   wallet.ts           Phantom/JSON keypair loading, wallet generation
   rpc.ts              Solana RPC helpers (balances, mint info, holders, priority fees, send+confirm)
   market/             jupiter (price, tokens, shield, ultra, swap), dexscreener, geckoterminal, candles
-  analysis/           indicators, safety scoring, scanner
-  strategies/         momentum, meanReversion, breakout, composite
+  analysis/           indicators, safety scoring, scanner, market regime
+  strategies/         momentum, meanReversion, breakout, composite, filters (HTF gate, ATR helpers)
   trading/            risk manager, position exits, live + paper executors
   storage/db.ts       SQLite persistence
   notify/telegram.ts  alerts
-  backtest/engine.ts  historical simulation
+  backtest/           engine.ts (historical simulation), tuner.ts (walk-forward parameter search)
+  notify/             telegram alerts + two-way commands
+  scripts/            supervise.mjs (auto-restart), copy-assets.mjs
 tests/                vitest suites
 ```
 

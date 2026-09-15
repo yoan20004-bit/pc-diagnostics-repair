@@ -16,6 +16,8 @@ export const ConfigSchema = z.object({
       candleTimeframeSec: z.number().min(15).default(60),
       warmupCandles: z.number().min(5).default(40),
       maxCandles: z.number().min(50).default(600),
+      fastExitIntervalSec: z.number().min(0).default(4), // extra price checks for open positions only; 0 = off
+      staleFeedAlertSec: z.number().min(15).default(90),
     })
     .prefault({}),
   watchlist: z.array(z.string()).default([]),
@@ -59,6 +61,14 @@ export const ConfigSchema = z.object({
       name: z.enum(['momentum', 'meanReversion', 'breakout', 'composite']).default('composite'),
       minBuyScore: z.number().min(0).max(1).default(0.62),
       minSellScore: z.number().min(0).max(1).default(0.55),
+      htf: z
+        .object({
+          enabled: z.boolean().default(true),
+          multiplier: z.number().int().min(2).max(60).default(5), // higher timeframe = multiplier x base candles
+          emaFast: z.number().int().min(2).default(9),
+          emaSlow: z.number().int().min(3).default(21),
+        })
+        .prefault({}),
       params: z
         .object({
           emaFast: z.number().int().min(2).default(9),
@@ -85,9 +95,36 @@ export const ConfigSchema = z.object({
         .prefault({}),
     })
     .prefault({}),
+  regime: z
+    .object({
+      enabled: z.boolean().default(true),
+      solEmaPeriod: z.number().int().min(5).default(50), // on higher-timeframe SOL candles
+      maxSolDrop1hPct: z.number().positive().default(4),
+      solPool: z.string().default('58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2'), // Raydium SOL/USDC for candle seeding
+    })
+    .prefault({}),
   risk: z
     .object({
       positionSizeSol: z.number().positive().default(0.25),
+      volatility: z
+        .object({
+          enabled: z.boolean().default(true),
+          atrPeriod: z.number().int().min(2).default(14),
+          stopAtrMultiple: z.number().positive().default(2.5),
+          minStopPct: z.number().positive().default(4),
+          maxStopPct: z.number().positive().default(15),
+          riskPerTradePct: z.number().positive().default(1), // % of balance lost if the stop is hit
+        })
+        .prefault({}),
+      lockProfitFraction: z.number().min(0).max(1).default(0.5), // after a TP rung, stop moves to rung gain x this
+      maxRoundTripLossPct: z.number().positive().default(6), // buy+sell quote loss beyond this = unsellable / taxed
+      autoBlacklist: z
+        .object({
+          enabled: z.boolean().default(true),
+          minFills: z.number().int().min(1).default(2),
+          maxAvgSlippagePct: z.number().positive().default(3),
+        })
+        .prefault({}),
       positionSizePct: z.number().positive().max(100).default(10),
       maxOpenPositions: z.number().int().min(1).default(3),
       maxExposureSol: z.number().positive().default(0.75),
@@ -113,6 +150,11 @@ export const ConfigSchema = z.object({
       maxConsecutiveLosses: z.number().int().positive().default(3),
       cooldownAfterLossMin: z.number().min(0).default(20),
       reentryCooldownMin: z.number().min(0).default(60),
+    })
+    .prefault({}),
+  telegram: z
+    .object({
+      commands: z.boolean().default(true), // accept /status /pause /close ... from the configured chat
     })
     .prefault({}),
   execution: z
@@ -188,6 +230,7 @@ export function loadConfig(path?: string): BotConfig {
   if (cfg.strategy.params.emaFast >= cfg.strategy.params.emaSlow) {
     throw new Error('strategy.params.emaFast must be smaller than emaSlow');
   }
+  if (cfg.risk.volatility.minStopPct > cfg.risk.volatility.maxStopPct) throw new Error('risk.volatility.minStopPct must be <= maxStopPct');
   const ladder = cfg.risk.takeProfitLadder;
   for (let i = 1; i < ladder.length; i++) {
     if (ladder[i].gainPct <= ladder[i - 1].gainPct) throw new Error('risk.takeProfitLadder gainPct must be increasing');

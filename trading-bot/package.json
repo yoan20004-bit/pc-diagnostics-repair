@@ -24,7 +24,10 @@
     "wallet:new": "tsx src/index.ts wallet new",
     "backtest": "tsx src/index.ts backtest",
     "panel": "tsx src/index.ts run",
-    "start": "node dist/index.js run"
+    "start": "node dist/index.js run",
+    "supervise": "node scripts/supervise.mjs",
+    "tune": "tsx src/index.ts tune",
+    "wallet:encrypt": "tsx src/index.ts wallet encrypt"
   },
   "dependencies": {
     "@solana/web3.js": "^1.99.0",
