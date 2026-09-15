@@ -27,7 +27,8 @@
     "start": "node dist/index.js run",
     "supervise": "node scripts/supervise.mjs",
     "tune": "tsx src/index.ts tune",
-    "wallet:encrypt": "tsx src/index.ts wallet encrypt"
+    "wallet:encrypt": "tsx src/index.ts wallet encrypt",
+    "doctor": "tsx src/index.ts doctor"
   },
   "dependencies": {
     "@solana/web3.js": "^1.99.0",

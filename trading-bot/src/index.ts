@@ -28,7 +28,8 @@ import { PositionManager } from './trading/positions.js';
 import { PanelServer } from './server/panel.js';
 import { PriceStream } from './market/stream.js';
 import { RiskManager, type RiskState } from './trading/risk.js';
-import { fmtNum, fmtPct, fromRaw, SOL_MINT } from './utils.js';
+import { fmtNum, fmtPct, fromRaw, SOL_MINT, USDC_MINT } from './utils.js';
+import { createServer } from 'node:http';
 import { decryptSecret, encryptSecret, generateWallet, keypairToBase58, loadKeypair, type EncryptedKey } from './wallet.js';
 import { tune } from './backtest/tuner.js';
 import { TelegramCommandLoop } from './notify/commands.js';
@@ -42,6 +43,7 @@ Phantom Solana Trading Bot
 Usage:
   phantom-bot run [--mode paper|live] [--config config.yaml]   Start the bot + control panel (http://localhost:8787)
                   [--no-panel] [--port 8787]
+  phantom-bot doctor                                          Check Node, .env, wallet, RPC, Jupiter, DexScreener, config, panel port
   phantom-bot scan                                            Discover + safety-check tradeable tokens
   phantom-bot check <mint>                                    Deep safety report for one token
   phantom-bot balance                                         Wallet SOL + token balances
@@ -96,6 +98,8 @@ async function main() {
   switch (cmd) {
     case 'run':
       return runBot(cfg, env);
+    case 'doctor':
+      return doctor(cfg, env);
     case 'scan':
       return scan(cfg, env);
     case 'check':
@@ -268,6 +272,107 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
   await bot.start();
   // loop stopped from the panel or Telegram: keep the process alive so it can be started again
   if (panel || commands) await new Promise(() => undefined);
+}
+
+async function doctor(cfg: BotConfig, env: EnvConfig) {
+  const rows: { name: string; ok: boolean | 'warn'; note: string }[] = [];
+  const add = (name: string, ok: boolean | 'warn', note: string) => rows.push({ name, ok, note });
+  const timed = async <T>(p: Promise<T>, ms = 15000): Promise<T> => Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timed out after ${ms / 1000}s`)), ms))]);
+
+  // 1. runtime
+  const [maj, min] = process.versions.node.split('.').map(Number);
+  add('Node.js', maj > 22 || (maj === 22 && min >= 13), `v${process.versions.node} (need 22.13+)`);
+  add('.env file', existsSync(resolve(process.cwd(), '.env')), existsSync(resolve(process.cwd(), '.env')) ? 'found' : 'missing: copy .env.example to .env');
+  add('config.yaml', true, `${env.configPath} valid (strategy ${cfg.strategy.name}, ${cfg.risk.positionSizeSol} SOL per trade, launch lane ${cfg.launch.enabled ? 'ON' : 'off'})`);
+  add('Mode', env.mode === 'paper' ? true : env.riskAcknowledged ? 'warn' : false, env.mode === 'paper' ? 'paper (simulated, safe)' : env.riskAcknowledged ? 'LIVE: real transactions will be sent' : 'live requested but I_UNDERSTAND_THE_RISKS is not "yes" (bot will refuse to start)');
+
+  // 2. wallet
+  let address: string | undefined;
+  try {
+    const kp = await walletFromEnv(env, false);
+    if (kp) {
+      address = kp.publicKey.toBase58();
+      add('Wallet key', true, `loaded, address ${address} (${env.privateKey ? 'PRIVATE_KEY in .env' : 'data/wallet.enc'})`);
+    } else add('Wallet key', env.mode === 'paper' ? 'warn' : false, 'no PRIVATE_KEY and no data/wallet.enc (paper mode can run without it; live cannot)');
+  } catch (e) {
+    add('Wallet key', false, (e as Error).message);
+  }
+
+  // 3. RPC
+  const rpc = new SolanaRpc(env.rpcUrl, env.rpcWsUrl);
+  const isPublic = /api\.mainnet-beta\.solana\.com/.test(env.rpcUrl);
+  try {
+    const t0 = Date.now();
+    const slot = await timed(rpc.connection.getSlot('confirmed'));
+    add('RPC', isPublic ? 'warn' : true, `${env.rpcUrl.replace(/api-key=[^&]+/, 'api-key=***')} answered in ${Date.now() - t0}ms (slot ${slot})${isPublic ? '; public RPC is slow and rate-limited, use Helius/QuickNode for live' : ''}`);
+    if (address) {
+      const bal = await timed(rpc.getSolBalance(new PublicKey(address)));
+      add('SOL balance', bal >= cfg.risk.minSolReserve + 0.01 || env.mode === 'paper' ? true : 'warn', `${bal.toFixed(4)} SOL${bal < cfg.risk.minSolReserve + cfg.risk.positionSizeSol ? ` (below reserve ${cfg.risk.minSolReserve} + one position ${cfg.risk.positionSizeSol}; fine for paper, fund it for live)` : ''}`);
+    }
+  } catch (e) {
+    add('RPC', false, `${(e as Error).message}: check RPC_URL`);
+  }
+
+  // 4. Jupiter
+  const jup = new JupiterClient(env.jupiterApiKey);
+  try {
+    const t0 = Date.now();
+    const prices = await timed(jup.getPrices([SOL_MINT]));
+    const sol = prices[SOL_MINT]?.usdPrice;
+    add('Jupiter price API', Boolean(sol), sol ? `SOL $${sol.toFixed(2)} in ${Date.now() - t0}ms via ${jup.baseUrl}${env.jupiterApiKey ? '' : ' (no JUPITER_API_KEY: free fallback is rate-limited and being sunset)'}` : 'no SOL price returned');
+    const toks = await timed(jup.getCategory('toptrending', '1h', 5));
+    add('Jupiter tokens API', toks.length > 0, `${toks.length} trending tokens (${toks.map((t) => t.symbol).join(', ')})`);
+    const sh = await timed(jup.shield([SOL_MINT]));
+    add('Jupiter shield API', typeof sh === 'object', `ok (${Object.keys(sh).length} entries)`);
+    if (address) {
+      const q = await timed(jup.swapQuote({ inputMint: SOL_MINT, outputMint: USDC_MINT, amount: 10_000_000n, slippageBps: 50 }));
+      add('Jupiter swap quote', BigInt(q.outAmount) > 0n, `0.01 SOL -> ${(Number(q.outAmount) / 1e6).toFixed(4)} USDC`);
+    }
+  } catch (e) {
+    add('Jupiter', false, `${(e as Error).message}${env.jupiterApiKey ? '' : ' (set JUPITER_API_KEY from portal.jup.ag)'}`);
+  }
+
+  // 5. DexScreener + GeckoTerminal
+  try {
+    const dex = new DexScreenerClient();
+    const pairs = await timed(dex.getTokenPairs(USDC_MINT));
+    add('DexScreener', pairs.length > 0, `${pairs.length} USDC pools, best on ${pairs[0]?.dexId ?? '?'} ($${fmtNum(pairs[0]?.liquidityUsd, 0)} liquidity)`);
+    const gecko = new GeckoTerminalClient();
+    const c = await timed(gecko.getOhlcv(cfg.regime.solPool, 60, 20));
+    add('GeckoTerminal', c.length > 0, `${c.length} SOL candles for the regime filter`);
+  } catch (e) {
+    add('Market data', false, (e as Error).message);
+  }
+
+  // 6. Telegram
+  if (env.telegramToken && env.telegramChatId) {
+    try {
+      const r = await timed(fetch(`https://api.telegram.org/bot${env.telegramToken}/getMe`));
+      const j = (await r.json()) as { ok?: boolean; result?: { username?: string } };
+      add('Telegram', Boolean(j.ok), j.ok ? `bot @${j.result?.username}, chat ${env.telegramChatId}, commands ${cfg.telegram.commands ? 'on' : 'off'}` : 'token rejected');
+    } catch (e) {
+      add('Telegram', false, (e as Error).message);
+    }
+  } else add('Telegram', 'warn', 'not configured (optional): set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for phone alerts');
+
+  // 7. panel port
+  if (env.panel.enabled) {
+    const free = await new Promise<boolean>((res) => {
+      const srv = createServer();
+      srv.once('error', () => res(false));
+      srv.listen(env.panel.port, env.panel.host, () => srv.close(() => res(true)));
+    });
+    add('Panel port', free, free ? `${env.panel.host}:${env.panel.port} free` : `${env.panel.port} already in use (another bot running? set PANEL_PORT)`);
+    if (env.panel.host !== '127.0.0.1' && env.panel.host !== 'localhost') add('Panel exposure', env.panel.token ? 'warn' : false, env.panel.token ? `panel reachable from the network, token required` : 'PANEL_HOST exposes the panel WITHOUT a token: anyone on the network can trade with your wallet');
+  }
+
+  const icon = (ok: boolean | 'warn') => (ok === true ? '\x1b[32m PASS \x1b[0m' : ok === 'warn' ? '\x1b[33m WARN \x1b[0m' : '\x1b[31m FAIL \x1b[0m');
+  console.log('\nPhantom Bot doctor\n');
+  for (const r of rows) console.log(`${icon(r.ok)} ${r.name.padEnd(20)} ${r.note}`);
+  const fails = rows.filter((r) => r.ok === false).length;
+  const warns = rows.filter((r) => r.ok === 'warn').length;
+  console.log(`\n${fails ? `${fails} problem(s) to fix.` : 'Everything needed is in place.'}${warns ? ` ${warns} warning(s).` : ''}${fails ? '' : env.mode === 'paper' ? ' Start with start.bat or `npm run panel`.' : ''}`);
+  process.exitCode = fails ? 1 : 0;
 }
 
 async function scan(cfg: BotConfig, env: EnvConfig) {

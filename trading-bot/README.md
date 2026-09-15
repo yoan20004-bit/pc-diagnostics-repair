@@ -132,6 +132,12 @@ PANEL_PORT=8787
 Or skip the terminal entirely: `start.bat` / `./start.sh` installs dependencies, creates
 `.env` from the example on first run, starts the bot and opens the panel in your browser.
 
+Check the setup:
+
+```bash
+npm run doctor                            # verifies Node, .env, wallet, RPC, Jupiter, DexScreener, config, panel port
+```
+
 Try the tooling:
 
 ```bash
@@ -234,6 +240,7 @@ confirmation. `paperSlippageBps` / `paperFeeSol` shape simulated fills.
 ## Commands
 
 ```
+npm run doctor                    pass/fail report of the whole setup (secrets never printed)
 npm run panel                     start the bot + control panel (same as `run`)
 npm run paper / npm run live      start the loop (or: npx tsx src/index.ts run --mode paper)
                                   add --no-panel to run headless, --port 9000 to move the panel
