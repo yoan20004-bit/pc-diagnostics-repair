@@ -1,0 +1,106 @@
+# ============================================================
+# Phantom Solana Trading Bot - strategy & risk configuration
+# All amounts are in SOL unless stated otherwise. Percentages are plain numbers (5 = 5%).
+# ============================================================
+
+loop:
+  pollIntervalSec: 15         # price refresh + exit checks
+  scanIntervalSec: 180        # how often the scanner looks for new tokens
+  candleTimeframeSec: 60      # 1-minute candles
+  warmupCandles: 40           # minimum candles before a strategy may fire
+  maxCandles: 600
+
+# Tokens you always want the bot to track (mint addresses). Leave empty to rely on the scanner.
+watchlist: []
+  # - JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN   # JUP
+  # - EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v  # USDC (example only)
+
+# Never trade these mints.
+blacklist: []
+
+scanner:
+  enabled: true
+  sources:                    # jupiter_toptrending | jupiter_toporganic | jupiter_toptraded | dexscreener_boosted
+    - jupiter_toptrending
+    - jupiter_toporganic
+    - dexscreener_boosted
+  interval: 1h                # 5m | 1h | 6h | 24h for Jupiter category endpoints
+  maxCandidates: 15           # max tokens tracked at once (watchlist + discovered)
+  filters:
+    minLiquidityUsd: 75000
+    minVolume24hUsd: 250000
+    minMarketCapUsd: 300000
+    maxMarketCapUsd: 200000000
+    minAgeHours: 24
+    minHolders: 800
+    minOrganicScore: 35
+    requireMintAuthorityDisabled: true
+    requireFreezeAuthorityDisabled: true
+    maxTopHoldersPct: 45      # top-10 holder concentration (Jupiter audit) - includes LP pools
+    allowToken2022: false     # Token-2022 mints can carry transfer fees / hooks
+    minBuySellRatio1h: 0.8    # buys / sells over the last hour
+    maxPriceChange1hPct: 60   # skip tokens that already pumped too hard
+    rejectShieldWarnings:     # Jupiter Shield warning types that hard-reject a token
+      - HAS_MINT_AUTHORITY
+      - HAS_FREEZE_AUTHORITY
+      - HAS_PERMANENT_DELEGATE
+      - TRANSFER_TAX
+      - NOT_SELLABLE
+
+strategy:
+  name: composite             # momentum | meanReversion | breakout | composite
+  minBuyScore: 0.62           # 0..1 confidence required to open
+  minSellScore: 0.55          # 0..1 confidence required for a signal-based exit
+  params:
+    emaFast: 9
+    emaSlow: 21
+    emaTrend: 50
+    rsiPeriod: 14
+    rsiBuyMin: 45
+    rsiBuyMax: 68
+    rsiOversold: 32
+    rsiOverbought: 72
+    bbPeriod: 20
+    bbStdDev: 2
+    breakoutLookback: 30
+    volumeSpikeMultiplier: 1.8
+    atrPeriod: 14
+    weights:                  # composite strategy weights
+      momentum: 0.45
+      breakout: 0.30
+      meanReversion: 0.25
+
+risk:
+  positionSizeSol: 0.25       # SOL spent per entry (hard cap)
+  positionSizePct: 10         # ...but never more than this % of the wallet's SOL balance
+  maxOpenPositions: 3
+  maxExposureSol: 0.75        # total SOL at risk across open positions
+  minSolReserve: 0.05         # always keep this much SOL for fees/rent
+  stopLossPct: 8
+  takeProfitLadder:           # partial exits; last rung closes the rest
+    - { gainPct: 12, sellPct: 40 }
+    - { gainPct: 25, sellPct: 30 }
+    - { gainPct: 60, sellPct: 100 }
+  trailingStop:
+    enabled: true
+    activationPct: 10         # start trailing once the position is up this much
+    trailPct: 6               # exit when price falls this % from the high-water mark
+  maxHoldMinutes: 720
+  maxSlippageBps: 200
+  maxPriceImpactPct: 1.5
+  maxDailyLossPct: 5          # of starting daily balance
+  maxTradesPerDay: 25
+  maxConsecutiveLosses: 3
+  cooldownAfterLossMin: 20
+  reentryCooldownMin: 60      # do not re-buy the same mint for this long after a sell
+
+execution:
+  engine: ultra               # ultra (recommended: Jupiter handles fees, landing, MEV) | swap
+  slippageBps: 100            # used for swap engine; ultra picks its own unless overridden
+  ultraSlippageBps: 0         # 0 = let Ultra decide
+  priorityLevel: high         # swap engine: medium | high | veryHigh
+  maxPriorityFeeLamports: 2000000
+  confirmTimeoutSec: 75
+  retries: 2
+  paperSlippageBps: 60        # simulated slippage for paper mode
+  paperFeeSol: 0.0015         # simulated network + priority fee per fill
