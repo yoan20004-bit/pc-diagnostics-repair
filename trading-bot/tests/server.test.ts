@@ -95,6 +95,18 @@ describe('PanelServer', () => {
     expect(bot.config.risk.stopLossPct).toBe(12);
   });
 
+  it('blocks cross-site and non-JSON state changes (CSRF guard)', async () => {
+    const plain = await fetch(base + '/api/control', { method: 'POST', headers: { 'x-panel-token': 'secret', 'content-type': 'text/plain' }, body: JSON.stringify({ action: 'pause' }) });
+    expect(plain.status).toBe(415);
+    const cross = await fetch(base + '/api/control', { method: 'POST', headers: { ...H, origin: 'https://evil.example' }, body: JSON.stringify({ action: 'pause' }) });
+    expect(cross.status).toBe(403);
+    const fetchSite = await fetch(base + '/api/state', { headers: { ...H, 'sec-fetch-site': 'cross-site' } });
+    expect(fetchSite.status).toBe(403);
+    const same = await fetch(base + '/api/control', { method: 'POST', headers: { ...H, origin: base }, body: JSON.stringify({ action: 'resume' }) });
+    expect(same.status).toBe(200);
+    expect(bot.isPaused).toBe(false);
+  });
+
   it('streams logs over SSE', async () => {
     const ctrl = new AbortController();
     const res = await fetch(base + '/api/events?token=secret', { signal: ctrl.signal });

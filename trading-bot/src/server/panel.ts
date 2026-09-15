@@ -99,6 +99,7 @@ export class PanelServer {
       }
       if (!path.startsWith('/api/')) throw new HttpError(404, 'not found');
       this.auth(req, url);
+      this.rejectCrossSite(req);
       if (path === '/api/events') return this.sse(req, res);
       const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : {};
       const result = await this.route(req.method ?? 'GET', path, url.searchParams, body);
@@ -107,6 +108,31 @@ export class PanelServer {
       const status = e instanceof HttpError ? e.status : 500;
       if (status >= 500) log.warn(`${req.method} ${path} failed: ${(e as Error).message}`);
       json(res, status, { error: (e as Error).message });
+    }
+  }
+
+  /**
+   * CSRF guard: the panel can trade with the wallet, so a web page open in the same browser must
+   * not be able to drive it. State-changing requests must be same-origin JSON; browsers send
+   * Sec-Fetch-Site / Origin on cross-site requests and skip the CORS preflight for non-JSON bodies.
+   */
+  private rejectCrossSite(req: IncomingMessage) {
+    const site = req.headers['sec-fetch-site'];
+    if (site && site !== 'same-origin' && site !== 'none') throw new HttpError(403, 'cross-site requests are not allowed');
+    const origin = req.headers.origin;
+    if (origin) {
+      const host = req.headers.host ?? '';
+      let originHost = '';
+      try {
+        originHost = new URL(origin).host;
+      } catch {
+        throw new HttpError(403, 'invalid origin');
+      }
+      if (originHost !== host) throw new HttpError(403, 'cross-origin requests are not allowed');
+    }
+    const mutating = req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE';
+    if (mutating && !/^application\/json/i.test(String(req.headers['content-type'] ?? ''))) {
+      throw new HttpError(415, 'state-changing requests must send application/json');
     }
   }
 

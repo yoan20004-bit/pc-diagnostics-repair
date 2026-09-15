@@ -266,8 +266,8 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   await bot.start();
-  // loop stopped from the panel: keep the process (and panel) alive so it can be started again
-  if (panel) await new Promise(() => undefined);
+  // loop stopped from the panel or Telegram: keep the process alive so it can be started again
+  if (panel || commands) await new Promise(() => undefined);
 }
 
 async function scan(cfg: BotConfig, env: EnvConfig) {

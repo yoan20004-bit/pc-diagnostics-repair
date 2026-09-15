@@ -106,7 +106,7 @@ export class TradingBot extends EventEmitter {
   private tracked = new Map<string, Candidate>();
   private pairs = new Map<string, PairInfo>();
   private open = new Map<string, Position>(); // one position per mint
-  private sellFailures = new Map<string, number>();
+  private sellFailures = new Map<string, { n: number; retryAt: number }>();
   private seeded = new Set<string>();
   private lastSignals = new Map<string, Signal>();
   private extraWatch = new Set<string>();
@@ -559,7 +559,8 @@ export class TradingBot extends EventEmitter {
     const balance = await this.d.executor.solBalance();
     for (const c of ok) {
       if (slots <= 0) break;
-      const check = this.d.risk.canOpen({ openPositions: this.open.size, exposureSol: [...this.open.values()].reduce((a, p) => a + p.costSol, 0), balanceSol: balance, mint: c.mint });
+      // global limits (daily loss, exposure, cooldowns) apply; the position-count cap is the lane's own
+      const check = this.d.risk.canOpen({ openPositions: 0, exposureSol: [...this.open.values()].reduce((a, p) => a + p.costSol, 0), balanceSol: balance, mint: c.mint });
       if (!check.ok) {
         log.info(`launch skip ${c.symbol}: ${check.reason}`);
         if (!check.reason?.startsWith('re-entry')) break;
@@ -692,8 +693,8 @@ export class TradingBot extends EventEmitter {
       const decision = this.d.positions.checkExit(p, price, sig);
       this.d.store.upsertPosition(p); // persist high-water mark
       if (!decision) continue;
-      const failures = this.sellFailures.get(p.id) ?? 0;
-      if (failures > 0 && this.tickNo % Math.min(2 ** failures, 16) !== 0) continue; // back off after failures
+      const f = this.sellFailures.get(p.id);
+      if (f && Date.now() < f.retryAt) continue; // back off after failed sells
       await this.exit(p, decision.sellPct, `${decision.kind}: ${decision.reason}`, decision.kind === 'takeProfit', decision.kind);
     }
   }
@@ -703,8 +704,9 @@ export class TradingBot extends EventEmitter {
     const total = held > 0n ? held : BigInt(p.amountRaw);
     const amount = sellPct >= 100 ? total : (total * BigInt(Math.round(sellPct * 100))) / 10000n;
     if (amount <= 0n) {
-      log.warn(`${p.symbol}: nothing to sell (balance 0) - closing position record`);
-      this.closeRecord(p, 'empty balance');
+      log.warn(`${p.symbol}: wallet holds none of this token (sold outside the bot, or an earlier sell landed after an error) - closing the record without a trade`);
+      this.closeRecord(p, 'closed: wallet balance was already zero');
+      void this.d.notifier.send(`ℹ️ <b>${h(p.symbol)}</b> position closed: the wallet no longer holds the token. Check Phantom history if you did not sell it yourself.`);
       return;
     }
     const fraction = Number(amount) / Number(total);
@@ -745,8 +747,8 @@ export class TradingBot extends EventEmitter {
           (fill.signature && this.d.executor.mode === 'live' ? `\nhttps://solscan.io/tx/${fill.signature}` : ''),
       );
     } catch (e) {
-      const n = (this.sellFailures.get(p.id) ?? 0) + 1;
-      this.sellFailures.set(p.id, n);
+      const n = (this.sellFailures.get(p.id)?.n ?? 0) + 1;
+      this.sellFailures.set(p.id, { n, retryAt: Date.now() + Math.min(2 ** n, 32) * 5_000 }); // 10s, 20s, 40s ... up to 160s
       log.error(`sell failed for ${p.symbol} (attempt ${n}): ${(e as Error).message}`);
       if (n === 3) await this.d.notifier.send(`⚠️ <b>Sell keeps failing for ${h(p.symbol)}</b>: ${h((e as Error).message)}\nCheck the token manually (possible honeypot / low liquidity).`);
     }
@@ -794,8 +796,9 @@ export class TradingBot extends EventEmitter {
 
     let exp = exposure;
     let bal = balance;
+    let coreOpen = [...this.open.values()].filter((p) => p.lane !== 'launch').length; // lanes have separate position caps
     for (const { c, sig } of ranked) {
-      const check = this.d.risk.canOpen({ openPositions: this.open.size, exposureSol: exp, balanceSol: bal, mint: c.mint });
+      const check = this.d.risk.canOpen({ openPositions: coreOpen, exposureSol: exp, balanceSol: bal, mint: c.mint });
       if (!check.ok) {
         log.info(`skip ${c.symbol} (score ${sig.score.toFixed(2)}): ${check.reason}`);
         if (check.reason?.startsWith('re-entry')) continue; // per-token limit: try the next candidate
@@ -811,6 +814,7 @@ export class TradingBot extends EventEmitter {
       if (spent > 0) {
         exp += spent;
         bal -= spent;
+        coreOpen++;
       }
     }
   }
@@ -825,7 +829,8 @@ export class TradingBot extends EventEmitter {
         : this.d.risk.checkQuote(preview);
       if (!q.ok) {
         log.warn(`skip ${c.symbol}: ${q.reason}`);
-        if (preview.roundTripLossPct !== undefined && preview.roundTripLossPct > this.cfg.risk.maxRoundTripLossPct) this.blacklistAuto(c.mint, c.symbol, q.reason ?? 'sell-path check failed');
+        const rtLimit = lane === 'launch' ? this.cfg.launch.maxRoundTripLossPct : this.cfg.risk.maxRoundTripLossPct;
+        if (preview.roundTripLossPct !== undefined && preview.roundTripLossPct > rtLimit) this.blacklistAuto(c.mint, c.symbol, q.reason ?? 'sell-path check failed');
         return 0;
       }
       const fill = await this.d.executor.buy(c.mint, c.decimals, sizeSol);

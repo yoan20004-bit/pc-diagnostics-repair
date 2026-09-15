@@ -93,7 +93,13 @@ export class LiveExecutor implements Executor {
   async buy(mint: string, _decimals: number, solAmount: number): Promise<Fill> {
     const amount = toRaw(solAmount, 9);
     const before = await this.solBalance();
-    const res = await this.swapWithRetry(SOL_MINT, mint, amount);
+    const tokenBefore = await this.tokenBalance(mint).catch(() => 0n);
+    // If a swap call errors AFTER the transaction landed (execute timeout, confirmation timeout), a
+    // blind retry or fallback would buy twice. The landed-check reads the token balance first.
+    const res = await this.swapWithRetry(SOL_MINT, mint, amount, async () => {
+      const now = await this.tokenBalance(mint).catch(() => tokenBefore);
+      return now > tokenBefore ? { inputAmountRaw: amount, outputAmountRaw: now - tokenBefore } : undefined;
+    });
     const after = await this.solBalance();
     const tokensOut = res.outputAmountRaw;
     const input = fromRaw(res.inputAmountRaw, 9);
@@ -106,7 +112,13 @@ export class LiveExecutor implements Executor {
 
   async sell(mint: string, _decimals: number, amountRaw: bigint): Promise<Fill> {
     const before = await this.solBalance();
-    const res = await this.swapWithRetry(mint, SOL_MINT, amountRaw);
+    const tokenBefore = await this.tokenBalance(mint).catch(() => amountRaw);
+    const res = await this.swapWithRetry(mint, SOL_MINT, amountRaw, async () => {
+      const now = await this.tokenBalance(mint).catch(() => tokenBefore);
+      if (now >= tokenBefore) return undefined;
+      const solNow = await this.solBalance();
+      return { inputAmountRaw: tokenBefore - now, outputAmountRaw: toRaw(Math.max(0, solNow - before), 9) };
+    });
     const after = await this.solBalance();
     const gross = fromRaw(res.outputAmountRaw, 9);
     const diff = after - before; // net of fees
@@ -115,7 +127,20 @@ export class LiveExecutor implements Executor {
     return { ...res, priceSol: amountRaw > 0n ? received / Number(amountRaw) : 0, feeSol: fee, outputAmountRaw: toRaw(Math.max(received, 0), 9) };
   }
 
-  private async swapWithRetry(inputMint: string, outputMint: string, amount: bigint) {
+  private async swapWithRetry(
+    inputMint: string,
+    outputMint: string,
+    amount: bigint,
+    landed: () => Promise<{ inputAmountRaw: bigint; outputAmountRaw: bigint } | undefined>,
+  ) {
+    type Res = Omit<Fill, 'priceSol' | 'feeSol'> & { inputAmountRaw: bigint; outputAmountRaw: bigint };
+    const orLanded = async (e: unknown): Promise<Res | undefined> => {
+      await sleep(2500); // let a just-sent transaction confirm before judging
+      const l = await landed();
+      if (!l) return undefined;
+      log.warn(`swap reported an error (${(e as Error).message}) but the balance moved: treating it as filled, no retry`);
+      return { ...l, signature: undefined, route: 'landed-after-error' };
+    };
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.cfg.retries; attempt++) {
       try {
@@ -123,12 +148,16 @@ export class LiveExecutor implements Executor {
           try {
             return await this.ultraSwap(inputMint, outputMint, amount);
           } catch (e) {
+            const l = await orLanded(e);
+            if (l) return l;
             log.warn(`ultra swap failed (${(e as Error).message}); falling back to swap API`);
             return await this.classicSwap(inputMint, outputMint, amount);
           }
         }
         return await this.classicSwap(inputMint, outputMint, amount);
       } catch (e) {
+        const l = await orLanded(e);
+        if (l) return l;
         lastErr = e;
         log.warn(`swap attempt ${attempt + 1}/${this.cfg.retries + 1} failed: ${(e as Error).message}`);
         await sleep(1500 * (attempt + 1));
