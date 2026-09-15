@@ -1,7 +1,7 @@
 {
   "name": "phantom-solana-trading-bot",
   "version": "1.0.0",
-  "description": "Professional automated Solana trading bot for Phantom wallets: market scanning, signal-based auto buy/sell, risk management, paper trading, Jupiter execution.",
+  "description": "Solana trading bot with a browser control panel for Phantom wallets: market scanning, signal-based auto buy/sell, risk management, paper trading, Jupiter execution.",
   "type": "module",
   "private": true,
   "engines": {
@@ -11,7 +11,7 @@
     "phantom-bot": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -22,7 +22,9 @@
     "balance": "tsx src/index.ts balance",
     "positions": "tsx src/index.ts positions",
     "wallet:new": "tsx src/index.ts wallet new",
-    "backtest": "tsx src/index.ts backtest"
+    "backtest": "tsx src/index.ts backtest",
+    "panel": "tsx src/index.ts run",
+    "start": "node dist/index.js run"
   },
   "dependencies": {
     "@solana/web3.js": "^1.99.0",

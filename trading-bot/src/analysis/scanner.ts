@@ -24,6 +24,10 @@ const STABLE_OR_BASE = new Set([
 export class TokenScanner {
   private tokenCache = new Map<string, { meta: TokenMeta; at: number }>();
 
+  setConfig(cfg: BotConfig) {
+    this.cfg = cfg;
+  }
+
   constructor(
     private cfg: BotConfig,
     private jup: JupiterClient,

@@ -15,6 +15,11 @@ export interface ExitDecision {
 export class PositionManager {
   constructor(private cfg: RiskConfig, private minSellScore: number) {}
 
+  setConfig(cfg: RiskConfig, minSellScore: number) {
+    this.cfg = cfg;
+    this.minSellScore = minSellScore;
+  }
+
   /** Update the high-water mark; returns true if it changed. */
   track(p: Position, priceSol: number): boolean {
     if (priceSol > p.highWaterMarkSol) {

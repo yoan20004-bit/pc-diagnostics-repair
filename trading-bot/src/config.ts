@@ -146,6 +146,8 @@ export interface EnvConfig {
   telegramChatId?: string;
   dbPath: string;
   logLevel: string;
+  panel: { enabled: boolean; host: string; port: number; token?: string };
+  configPath: string;
 }
 
 export function loadEnv(): EnvConfig {
@@ -161,6 +163,13 @@ export function loadEnv(): EnvConfig {
     telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || undefined,
     dbPath: process.env.DB_PATH || resolve(process.cwd(), 'data/bot.db'),
     logLevel: process.env.LOG_LEVEL || 'info',
+    panel: {
+      enabled: (process.env.PANEL || 'on').toLowerCase() !== 'off',
+      host: process.env.PANEL_HOST || '127.0.0.1',
+      port: Number(process.env.PANEL_PORT) || 8787,
+      token: process.env.PANEL_TOKEN?.trim() || undefined,
+    },
+    configPath: resolve(process.cwd(), process.env.CONFIG_PATH || 'config.yaml'),
   };
 }
 

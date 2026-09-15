@@ -8,6 +8,7 @@ process.on('warning', (w) => {
 });
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { PublicKey } from '@solana/web3.js';
 import { TokenScanner } from './analysis/scanner.js';
 import { parseCandlesCsv, runBacktest } from './backtest/engine.js';
@@ -23,6 +24,7 @@ import { Store } from './storage/db.js';
 import { createStrategy } from './strategies/registry.js';
 import { LiveExecutor, PaperExecutor, type Executor, type PaperState } from './trading/executor.js';
 import { PositionManager } from './trading/positions.js';
+import { PanelServer } from './server/panel.js';
 import { RiskManager, type RiskState } from './trading/risk.js';
 import { fmtNum, fmtPct, fromRaw, SOL_MINT } from './utils.js';
 import { generateWallet, loadKeypair } from './wallet.js';
@@ -33,7 +35,8 @@ const HELP = `
 Phantom Solana Trading Bot
 
 Usage:
-  phantom-bot run [--mode paper|live] [--config config.yaml]   Start the bot loop
+  phantom-bot run [--mode paper|live] [--config config.yaml]   Start the bot + control panel (http://localhost:8787)
+                  [--no-panel] [--port 8787]
   phantom-bot scan                                            Discover + safety-check tradeable tokens
   phantom-bot check <mint>                                    Deep safety report for one token
   phantom-bot balance                                         Wallet SOL + token balances
@@ -55,6 +58,8 @@ async function main() {
     options: {
       mode: { type: 'string' },
       config: { type: 'string' },
+      'no-panel': { type: 'boolean' },
+      port: { type: 'string' },
       log: { type: 'string' },
       save: { type: 'string' },
       pct: { type: 'string' },
@@ -74,6 +79,9 @@ async function main() {
   const env = loadEnv();
   if (values.mode) env.mode = values.mode === 'live' ? 'live' : 'paper';
   setLogLevel(((values.log as LogLevel) || env.logLevel) as LogLevel);
+  if (values.config) env.configPath = resolve(process.cwd(), values.config);
+  if (values['no-panel']) env.panel.enabled = false;
+  if (values.port) env.panel.port = Number(values.port);
   const cfg = loadConfig(values.config);
 
   switch (cmd) {
@@ -157,33 +165,38 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
   const risk = new RiskManager(cfg.risk, ctx.store.getJson<RiskState>('risk'), (s) => ctx.store.setJson('risk', s));
   let bot: TradingBot;
   const { executor, address } = buildExecutor(ctx, (mint) => {
-    const c = trackedDecimals.get(mint);
-    return c === undefined ? undefined : bot.priceSolPerRaw(mint, c);
+    const d = bot.decimalsOf(mint);
+    return d === undefined ? undefined : bot.priceSolPerRaw(mint, d);
   });
-  const trackedDecimals = new Map<string, number>();
   const strategy = createStrategy(cfg.strategy.name);
   const notifier = new Notifier(env.telegramToken, env.telegramChatId);
   bot = new TradingBot(cfg, env, {
     jup: ctx.jup, dex: ctx.dex, gecko: ctx.gecko, scanner: ctx.scanner, store: ctx.store, executor, risk,
     positions: new PositionManager(cfg.risk, cfg.strategy.minSellScore), strategy, notifier, walletAddress: address,
   });
-  // paper executor needs decimals per mint; wrap scanner discover to capture them
-  const origDiscover = ctx.scanner.discover.bind(ctx.scanner);
-  ctx.scanner.discover = async (extra) => {
-    const list = await origDiscover(extra);
-    for (const c of list) trackedDecimals.set(c.mint, c.decimals);
-    return list;
-  };
-  for (const p of ctx.store.openPositions()) trackedDecimals.set(p.mint, p.decimals);
 
   if (env.mode === 'live') {
     log.warn('LIVE MODE: real transactions will be sent from ' + address);
   } else {
-    log.info('PAPER MODE: fills are simulated; no transactions are sent. Starting paper balance: ' + (await executor.solBalance()).toFixed(3) + ' SOL');
+    log.info('PAPER MODE: fills are simulated; no transactions are sent. Paper balance: ' + (await executor.solBalance()).toFixed(3) + ' SOL');
+  }
+  let panel: PanelServer | undefined;
+  if (env.panel.enabled) {
+    panel = new PanelServer({ host: env.panel.host, port: env.panel.port, token: env.panel.token, configPath: env.configPath }, { bot, store: ctx.store, scanner: ctx.scanner, dex: ctx.dex, gecko: ctx.gecko });
+    try {
+      await panel.listen();
+    } catch (e) {
+      log.warn(`control panel could not start (${(e as Error).message}); continuing without it. Use PANEL_PORT to pick another port.`);
+      panel = undefined;
+    }
+    if (env.panel.host !== '127.0.0.1' && env.panel.host !== 'localhost' && !env.panel.token) {
+      log.warn('PANEL_HOST exposes the panel to the network without PANEL_TOKEN - anyone who can reach it can trade with your wallet');
+    }
   }
   const shutdown = async () => {
     log.info('shutting down...');
     bot.stop();
+    panel?.close();
     await notifier.send('🛑 Bot stopped');
     ctx.store.close();
     process.exit(0);
@@ -191,6 +204,8 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   await bot.start();
+  // loop stopped from the panel: keep the process (and panel) alive so it can be started again
+  if (panel) await new Promise(() => undefined);
 }
 
 async function scan(cfg: BotConfig, env: EnvConfig) {

@@ -1,11 +1,14 @@
 # Phantom Solana Trading Bot
 
-An automated, risk-managed trading bot for Solana that trades from a wallet you can
-watch in **Phantom**. It scans the market for tradeable tokens, screens them for rug and
-honeypot risk, generates entries from technical signals, and manages every position with
-stop-loss, laddered take-profit, trailing stop and time exits. Swaps execute through
-**Jupiter Ultra** (Jupiter handles routing, priority fees, transaction landing and MEV
-protection), with the classic Jupiter Swap API as a fallback.
+An automated, risk-managed trading bot for Solana with a **browser control panel**, trading
+from a wallet you can watch in **Phantom**. It scans the market for tradeable tokens, screens
+them for rug and honeypot risk, generates entries from technical signals, and manages every
+position with stop-loss, laddered take-profit, trailing stop and time exits. Swaps execute
+through **Jupiter Ultra** (Jupiter handles routing, priority fees, transaction landing and
+MEV protection), with the classic Jupiter Swap API as a fallback.
+
+Double-click `start.bat` (Windows) or run `./start.sh` (macOS/Linux) and the panel opens at
+<http://localhost:8787>.
 
 > **This bot can lose money.** Crypto markets are volatile, memecoins are adversarial,
 > and no strategy wins consistently. Start in paper mode, fund the bot wallet only with
@@ -33,6 +36,27 @@ computer can drain everything that account holds.
 
 ---
 
+## Control panel
+
+The bot serves a dashboard while it runs (`npm run panel`, `start.bat`, or plain `run`):
+
+| Tab | What you can do |
+|---|---|
+| Overview | Balance, daily and all-time PnL, open positions with live gain / high-water mark / take-profit progress, one-click **Sell 50%** / **Close**, realised-PnL chart, engine summary |
+| Market | Every tracked token with live signal (action + confidence + reasons), price, 1h/24h change, liquidity, market cap, volume, holders, organic score, safety score, buy/sell flow; **Buy** or stop tracking |
+| Trades | Full trade history with PnL, fees and Solscan links |
+| Logs | Live streaming log with buy/sell highlights |
+| Tools | Check any token's safety report, place a manual buy, add a token to the watchlist, run a backtest with an equity chart |
+| Settings | Quick settings for strategy, sizing, exits, limits and scanner filters (applied instantly), plus the full YAML config with validation |
+
+Top bar: **Start / Stop** the trading loop, **Pause entries** (exits are still managed),
+**Scan now**. Trade notifications pop up as they happen.
+
+The panel binds to `127.0.0.1` only. To open it from your phone on the same Wi-Fi set
+`PANEL_HOST=0.0.0.0` **and** `PANEL_TOKEN=<long random secret>` in `.env`, then browse to
+`http://<pc-ip>:8787/?token=<secret>`. Anyone who can reach the panel can trade with the
+wallet, so never expose it without a token, and use a VPN or SSH tunnel for remote access.
+
 ## Features
 
 | Area | What it does |
@@ -48,7 +72,8 @@ computer can drain everything that account holds.
 | Backtesting | Same strategy + exit rules over historical candles (from a CSV or fetched for any mint) |
 | Persistence | SQLite (Node built-in, no native build) for positions, trades, risk state |
 | Alerts | Optional Telegram messages for every buy, sell, failure, start/stop |
-| Manual control | `buy`, `sell`, `check <mint>`, `scan`, `balance`, `positions` |
+| Manual control | Panel buttons, or CLI: `buy`, `sell`, `check <mint>`, `scan`, `balance`, `positions` |
+| Control panel | Local web dashboard (JSON API + live event stream) with every feature above |
 
 ---
 
@@ -79,7 +104,11 @@ RPC_URL=https://mainnet.helius-rpc.com/?api-key=...
 JUPITER_API_KEY=...
 MODE=paper
 I_UNDERSTAND_THE_RISKS=no
+PANEL_PORT=8787
 ```
+
+Or skip the terminal entirely: `start.bat` / `./start.sh` installs dependencies, creates
+`.env` from the example on first run, starts the bot and opens the panel in your browser.
 
 Try the tooling:
 
@@ -157,7 +186,9 @@ confirmation. `paperSlippageBps` / `paperFeeSol` shape simulated fills.
 ## Commands
 
 ```
+npm run panel                     start the bot + control panel (same as `run`)
 npm run paper / npm run live      start the loop (or: npx tsx src/index.ts run --mode paper)
+                                  add --no-panel to run headless, --port 9000 to move the panel
 npm run scan                      discovery + safety table
 npm run balance                   SOL and token balances of the bot wallet (+ paper wallet)
 npm run positions                 open positions, closed positions, PnL, recent trades
@@ -227,7 +258,8 @@ Project layout:
 ```
 src/
   index.ts            CLI
-  bot.ts              main loop (scan → prices → exits → entries)
+  bot.ts              main loop (scan → prices → exits → entries) + panel hooks (pause, snapshot, manual orders)
+  server/             control panel: panel.ts (HTTP API + SSE), panel.html (dashboard UI)
   config.ts           zod-validated config + env
   wallet.ts           Phantom/JSON keypair loading, wallet generation
   rpc.ts              Solana RPC helpers (balances, mint info, holders, priority fees, send+confirm)

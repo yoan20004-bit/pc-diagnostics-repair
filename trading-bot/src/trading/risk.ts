@@ -29,6 +29,17 @@ const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10);
 export class RiskManager {
   state: RiskState;
 
+  setConfig(cfg: RiskConfig) {
+    this.cfg = cfg;
+  }
+
+  /** Clear a daily-loss halt manually (panel action). */
+  resume() {
+    this.state.haltedReason = undefined;
+    this.state.consecutiveLosses = 0;
+    this.save();
+  }
+
   constructor(
     private cfg: RiskConfig,
     initial?: Partial<RiskState>,
