@@ -18,7 +18,7 @@ import type { PositionManager } from './trading/positions.js';
 import type { RiskManager } from './trading/risk.js';
 import type { Candidate, LaunchCandidate, PairInfo, Position, RegimeStatus, Signal } from './types.js';
 import type { PriceStream, StreamTick } from './market/stream.js';
-import { SOL_MINT, fmtNum, fmtPct, fromRaw, shortMint, sleep, uid } from './utils.js';
+import { SOL_MINT, escapeHtml as h, fmtNum, fmtPct, fromRaw, shortMint, sleep, uid } from './utils.js';
 
 const log = createLogger('bot');
 
@@ -132,6 +132,8 @@ export class TradingBot extends EventEmitter {
   private launchEntries: number[] = []; // timestamps of launch-lane entries (rate limit)
   private streamTicks: number[] = [];
   private streamExitPending = false;
+  private loopDone: Promise<void> | undefined;
+  private streamFailedAt = new Map<string, number>();
 
   constructor(private cfg: BotConfig, private env: EnvConfig, private d: BotDeps) {
     super();
@@ -166,16 +168,21 @@ export class TradingBot extends EventEmitter {
     if (!st || !this.cfg.stream.enabled) return;
     const want = [...new Set([...this.open.keys(), ...this.tracked.keys()])].slice(0, this.cfg.stream.maxSubscriptions);
     for (const m of st.watching) if (!want.includes(m)) await st.unwatch(m);
+    for (const m of [...this.streamFailedAt.keys()]) if (!want.includes(m)) this.streamFailedAt.delete(m);
     for (const m of want) {
       if (st.has(m)) continue;
+      const retryAt = this.streamFailedAt.get(m);
+      if (retryAt && Date.now() < retryAt) continue;
       const pair = this.pairs.get(m) ?? this.tracked.get(m)?.pair;
       const dec = this.decimalsOf(m);
       if (!pair || dec === undefined) continue;
       const quoteDec = pair.quoteToken.address === SOL_MINT ? 9 : 6;
       if (pair.quoteToken.address !== SOL_MINT && !/USD/i.test(pair.quoteToken.symbol)) continue; // only SOL/USD-quoted pools
       try {
-        await st.watch(m, pair, dec, quoteDec);
+        if (await st.watch(m, pair, dec, quoteDec)) this.streamFailedAt.delete(m);
+        else this.streamFailedAt.set(m, Date.now() + 10 * 60_000); // pool layout not streamable: retry in 10 minutes
       } catch (e) {
+        this.streamFailedAt.set(m, Date.now() + 30_000); // transient RPC error: retry soon
         log.debug(`stream watch ${this.tracked.get(m)?.symbol ?? m}: ${(e as Error).message}`);
       }
     }
@@ -407,8 +414,33 @@ export class TradingBot extends EventEmitter {
     return [...this.open.values()];
   }
 
+  private starting = false;
+
   async start() {
-    if (this.running) return;
+    if (this.running || this.starting) return;
+    this.starting = true;
+    try {
+      if (this.loopDone) await this.loopDone; // a previous loop may still be finishing its last iteration
+      if (this.running) return;
+      let finish!: () => void;
+      this.loopDone = new Promise<void>((r) => (finish = r));
+      try {
+        await this.runLoop();
+      } catch (e) {
+        this.running = false; // a failed start must not leave the bot reporting 'running' with no loop
+        log.error('bot loop failed to start:', (e as Error).message);
+        throw e;
+      } finally {
+        this.loopDone = undefined;
+        finish();
+        this.emit('state');
+      }
+    } finally {
+      this.starting = false;
+    }
+  }
+
+  private async runLoop() {
     this.running = true;
     this.emit('state');
     const balance = await this.d.executor.solBalance();
@@ -709,14 +741,14 @@ export class TradingBot extends EventEmitter {
       const pnlPct = costPart ? (pnl / costPart) * 100 : 0;
       log.info(`${closedFully ? 'CLOSED' : 'PARTIAL'} ${p.symbol}: +${received.toFixed(4)} SOL, pnl ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${fmtPct(pnlPct)}) sig=${fill.signature ?? '-'}`);
       await this.d.notifier.send(
-        `${pnl >= 0 ? '✅' : '🔻'} <b>${closedFully ? 'SOLD' : 'PARTIAL SELL'} ${p.symbol}</b> (${this.d.executor.mode})\n${reason}\nReceived ${received.toFixed(4)} SOL | PnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${fmtPct(pnlPct)})` +
+        `${pnl >= 0 ? '✅' : '🔻'} <b>${closedFully ? 'SOLD' : 'PARTIAL SELL'} ${h(p.symbol)}</b> (${this.d.executor.mode})\n${h(reason)}\nReceived ${received.toFixed(4)} SOL | PnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${fmtPct(pnlPct)})` +
           (fill.signature && this.d.executor.mode === 'live' ? `\nhttps://solscan.io/tx/${fill.signature}` : ''),
       );
     } catch (e) {
       const n = (this.sellFailures.get(p.id) ?? 0) + 1;
       this.sellFailures.set(p.id, n);
       log.error(`sell failed for ${p.symbol} (attempt ${n}): ${(e as Error).message}`);
-      if (n === 3) await this.d.notifier.send(`⚠️ <b>Sell keeps failing for ${p.symbol}</b>: ${(e as Error).message}\nCheck the token manually (possible honeypot / low liquidity).`);
+      if (n === 3) await this.d.notifier.send(`⚠️ <b>Sell keeps failing for ${h(p.symbol)}</b>: ${h((e as Error).message)}\nCheck the token manually (possible honeypot / low liquidity).`);
     }
   }
 
@@ -788,9 +820,9 @@ export class TradingBot extends EventEmitter {
     log.info(`BUY ${lane === 'launch' ? 'launch' : 'signal'} ${c.symbol} score=${sig.score.toFixed(2)} size=${sizeSol} SOL stop=${stop.toFixed(1)}% :: ${sig.reasons.slice(0, 4).join('; ')}`);
     try {
       const preview = await this.d.executor.previewBuy(c.mint, sizeSol);
-      const q = lane === 'launch' && preview.roundTripLossPct !== undefined && preview.roundTripLossPct > this.cfg.launch.maxRoundTripLossPct
-        ? { ok: false, reason: `sell-path check: round trip loses ${preview.roundTripLossPct.toFixed(1)}% (> ${this.cfg.launch.maxRoundTripLossPct}% launch limit)` }
-        : this.d.risk.checkQuote(lane === 'launch' ? { ...preview, roundTripLossPct: undefined, priceImpactPct: undefined } : preview);
+      const q = lane === 'launch'
+        ? this.d.risk.checkQuote(preview, { maxPriceImpactPct: this.cfg.launch.maxPriceImpactPct, maxRoundTripLossPct: this.cfg.launch.maxRoundTripLossPct })
+        : this.d.risk.checkQuote(preview);
       if (!q.ok) {
         log.warn(`skip ${c.symbol}: ${q.reason}`);
         if (preview.roundTripLossPct !== undefined && preview.roundTripLossPct > this.cfg.risk.maxRoundTripLossPct) this.blacklistAuto(c.mint, c.symbol, q.reason ?? 'sell-path check failed');
@@ -829,7 +861,7 @@ export class TradingBot extends EventEmitter {
       this.emit('trade', { side: 'buy', symbol: c.symbol, mint: c.mint, sol: spent, reason: sig.reasons.join('; '), lane });
       log.info(`OPENED ${lane === 'launch' ? '[launch] ' : ''}${c.symbol}: ${fromRaw(fill.outputAmountRaw, c.decimals).toFixed(4)} tokens for ${spent.toFixed(4)} SOL @ $${fmtNum(p.entryPriceUsd, 6)} sig=${fill.signature ?? '-'}`);
       await this.d.notifier.send(
-        `🟢 <b>BOUGHT ${c.symbol}</b> (${this.d.executor.mode})\n${spent.toFixed(4)} SOL @ $${fmtNum(p.entryPriceUsd, 6)}\nScore ${sig.score.toFixed(2)}: ${sig.reasons.slice(0, 3).join('; ')}` +
+        `🟢 <b>BOUGHT ${h(c.symbol)}</b> (${this.d.executor.mode})\n${spent.toFixed(4)} SOL @ $${fmtNum(p.entryPriceUsd, 6)}\nScore ${sig.score.toFixed(2)}: ${h(sig.reasons.slice(0, 3).join('; '))}` +
           (fill.signature && this.d.executor.mode === 'live' ? `\nhttps://solscan.io/tx/${fill.signature}` : ''),
       );
       return spent;
@@ -856,7 +888,7 @@ export class TradingBot extends EventEmitter {
     this.autoBlacklist.add(mint);
     this.d.store.setJson('autoBlacklist', [...this.autoBlacklist]);
     log.warn(`auto-blacklisted ${symbol}: ${why}`);
-    void this.d.notifier.send(`⛔ <b>${symbol} blacklisted</b>: ${why}`);
+    void this.d.notifier.send(`⛔ <b>${h(symbol)} blacklisted</b>: ${h(why)}`);
   }
 
   /* --------------------------------------------------------------- status */

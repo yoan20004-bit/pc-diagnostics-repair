@@ -51,6 +51,10 @@ export function shortMint(m: string) {
   return m.length > 12 ? `${m.slice(0, 4)}…${m.slice(-4)}` : m;
 }
 
+export function escapeHtml(s: string): string {
+  return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] as string);
+}
+
 export function uid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }

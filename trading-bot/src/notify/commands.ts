@@ -99,7 +99,7 @@ export class TelegramCommandLoop {
           const chat = String(u.message?.chat?.id ?? '');
           const text = u.message?.text;
           if (!text || chat !== this.chatId) continue;
-          const reply = await handleCommand(text, this.handlers).catch((e) => `error: ${(e as Error).message}`);
+          const reply = await handleCommand(text, this.handlers).catch((e) => `error: ${String((e as Error).message).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] as string)}`);
           if (reply) await this.send(reply);
         }
       } catch (e) {

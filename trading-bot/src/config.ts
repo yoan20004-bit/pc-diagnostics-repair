@@ -175,6 +175,7 @@ export const ConfigSchema = z.object({
       maxOpen: z.number().int().min(1).default(2),
       maxPerHour: z.number().int().min(1).default(6),
       maxRoundTripLossPct: z.number().positive().default(10),
+      maxPriceImpactPct: z.number().positive().default(5), // new pools are thin; looser than the core lane
       exits: z
         .object({
           stopLossPct: z.number().positive().default(20),

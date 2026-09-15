@@ -195,7 +195,8 @@ higher timeframe, `maxSolDrop1hPct`). Both default on.
 Off by default. `enabled`, `sizeSol`, `maxOpen`, `maxPerHour` bound the budget. Entry filters:
 `minAgeMinutes` / `maxAgeMinutes`, `minLiquidityUsd` / `maxLiquidityUsd`, `minHolders`,
 `minBuys5m`, `minBuySellRatio5m`, `minVolume5mUsd`, `maxPriceChange5mPct`, `requireSocials`,
-`maxTopHoldersPct`, `maxBundledHolders`, `maxFreshWallets`, `minScore`, `maxRoundTripLossPct`.
+`maxTopHoldersPct`, `maxBundledHolders`, `maxFreshWallets`, `minScore`, `maxRoundTripLossPct`,
+`maxPriceImpactPct`.
 `exits` is a separate profile (wide stop, aggressive ladder, short max hold). The daily loss
 circuit breaker and the regime filter apply to this lane too.
 

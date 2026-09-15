@@ -32,7 +32,7 @@ import { fmtNum, fmtPct, fromRaw, SOL_MINT } from './utils.js';
 import { decryptSecret, encryptSecret, generateWallet, keypairToBase58, loadKeypair, type EncryptedKey } from './wallet.js';
 import { tune } from './backtest/tuner.js';
 import { TelegramCommandLoop } from './notify/commands.js';
-import { fmtPct as fmtP } from './utils.js';
+import { fmtPct as fmtP, escapeHtml as h } from './utils.js';
 
 const log = createLogger('cli');
 
@@ -234,20 +234,20 @@ async function runBot(cfg: BotConfig, env: EnvConfig) {
     commands = new TelegramCommandLoop(env.telegramToken, env.telegramChatId, {
       status: () => {
         const s = bot.snapshot();
-        return `${s.running ? (s.paused ? '⏸ running, entries paused' : '▶ running') : '⏹ stopped'} (${s.mode})\nBalance ${s.balanceSol.toFixed(4)} SOL | SOL $${s.solUsd.toFixed(2)}\nToday ${s.risk.dailyPnlSol >= 0 ? '+' : ''}${s.risk.dailyPnlSol.toFixed(4)} SOL, ${s.risk.tradesToday} trades | all-time ${s.stats.pnlSol >= 0 ? '+' : ''}${s.stats.pnlSol.toFixed(4)} SOL\nOpen ${s.positions.length}/${s.config.risk.maxOpenPositions}, tracking ${s.tracked.length}\nRegime: ${s.regime.ok ? 'OK' : 'RISK-OFF'} - ${s.regime.reason}` + (s.risk.haltedReason ? `\nHALTED: ${s.risk.haltedReason}` : '');
+        return `${s.running ? (s.paused ? '⏸ running, entries paused' : '▶ running') : '⏹ stopped'} (${s.mode})\nBalance ${s.balanceSol.toFixed(4)} SOL | SOL $${s.solUsd.toFixed(2)}\nToday ${s.risk.dailyPnlSol >= 0 ? '+' : ''}${s.risk.dailyPnlSol.toFixed(4)} SOL, ${s.risk.tradesToday} trades | all-time ${s.stats.pnlSol >= 0 ? '+' : ''}${s.stats.pnlSol.toFixed(4)} SOL\nOpen ${s.positions.length}/${s.config.risk.maxOpenPositions}, tracking ${s.tracked.length}\nRegime: ${s.regime.ok ? 'OK' : 'RISK-OFF'} - ${h(s.regime.reason)}` + (s.risk.haltedReason ? `\nHALTED: ${h(s.risk.haltedReason)}` : '');
       },
       positions: () => {
         const ps = bot.snapshot().positions;
-        return ps.length ? ps.map((p) => `${p.symbol}: ${fmtP(p.gainPct)} | cost ${p.costSol.toFixed(3)} SOL | stop ${fmtP(p.stopLevelPct)} | TP ${p.ladderDone}/${p.ladderTotal} | ${p.ageMin}m`).join('\n') : 'no open positions';
+        return ps.length ? ps.map((p) => `${h(p.symbol)}: ${fmtP(p.gainPct)} | cost ${p.costSol.toFixed(3)} SOL | stop ${fmtP(p.stopLevelPct)} | TP ${p.ladderDone}/${p.ladderTotal} | ${p.ageMin}m`).join('\n') : 'no open positions';
       },
       pause: () => (bot.pause(), 'entries paused'),
       resume: () => (bot.resume(), 'entries resumed'),
       scan: () => (void bot.scanNow(), 'scan started'),
       close: async (target, pct) => {
         const p = bot.snapshot().positions.find((x) => x.symbol.toLowerCase() === target.toLowerCase() || x.mint === target);
-        if (!p) return `no open position matching ${target}`;
+        if (!p) return `no open position matching ${h(target)}`;
         await bot.closePosition(p.mint, pct);
-        return `sold ${pct}% of ${p.symbol}`;
+        return `sold ${pct}% of ${h(p.symbol)}`;
       },
       stop: () => (bot.stop(), 'stopping trading loop'),
       start: () => (void bot.start(), 'starting trading loop'),

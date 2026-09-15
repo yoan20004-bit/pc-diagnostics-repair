@@ -75,14 +75,14 @@ export class PriceStream extends EventEmitter {
     const pool = new PublicKey(pair.pairAddress);
     // 1. vaults owned by the pool itself
     const [b, q] = await Promise.all([
-      this.conn.getTokenAccountsByOwner(pool, { mint: new PublicKey(mint) }, 'confirmed').catch(() => ({ value: [] })),
-      this.conn.getTokenAccountsByOwner(pool, { mint: new PublicKey(quoteMint) }, 'confirmed').catch(() => ({ value: [] })),
+      this.conn.getTokenAccountsByOwner(pool, { mint: new PublicKey(mint) }, 'confirmed'),
+      this.conn.getTokenAccountsByOwner(pool, { mint: new PublicKey(quoteMint) }, 'confirmed'),
     ]);
     if (b.value[0] && q.value[0]) {
       return { baseVault: b.value[0].pubkey.toBase58(), quoteVault: q.value[0].pubkey.toBase58(), baseDecimals, quoteDecimals, quoteMint };
     }
     // 2. Raydium v4 layout
-    const acc = await this.conn.getAccountInfo(pool, 'confirmed').catch(() => null);
+    const acc = await this.conn.getAccountInfo(pool, 'confirmed');
     if (acc?.data) {
       const v = parseRaydiumV4Vaults(acc.data);
       if (v) {

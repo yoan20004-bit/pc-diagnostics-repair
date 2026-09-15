@@ -139,6 +139,7 @@ launch:
   maxOpen: 2
   maxPerHour: 6
   maxRoundTripLossPct: 10
+  maxPriceImpactPct: 5      # new pools are thin; looser than the core lane's limit
   exits:
     stopLossPct: 20
     takeProfitLadder:

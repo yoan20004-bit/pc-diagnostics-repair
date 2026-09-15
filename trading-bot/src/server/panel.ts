@@ -279,7 +279,14 @@ export class PanelServer {
   private broadcast(event: string, data: unknown) {
     if (!this.clients.size) return;
     const payload = `event: ${event}\ndata: ${JSON.stringify(data, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}\n\n`;
-    for (const c of this.clients) c.write(payload);
+    for (const c of this.clients) {
+      try {
+        if (c.writableEnded || c.destroyed) this.clients.delete(c);
+        else c.write(payload);
+      } catch {
+        this.clients.delete(c);
+      }
+    }
   }
 }
 

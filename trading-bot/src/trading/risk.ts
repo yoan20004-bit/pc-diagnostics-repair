@@ -125,15 +125,20 @@ export class RiskManager {
   }
 
   /** Validate a quote against slippage/impact limits. */
-  checkQuote(q: { priceImpactPct?: number; slippageBps?: number; roundTripLossPct?: number }): { ok: boolean; reason?: string } {
-    if (q.priceImpactPct !== undefined && q.priceImpactPct > this.cfg.maxPriceImpactPct) {
-      return { ok: false, reason: `price impact ${q.priceImpactPct.toFixed(2)}% > ${this.cfg.maxPriceImpactPct}%` };
+  /** Validate a quote against impact/slippage/sell-path limits; a lane may override the limits. */
+  checkQuote(
+    q: { priceImpactPct?: number; slippageBps?: number; roundTripLossPct?: number },
+    limits: Partial<Pick<RiskConfig, 'maxPriceImpactPct' | 'maxSlippageBps' | 'maxRoundTripLossPct'>> = {},
+  ): { ok: boolean; reason?: string } {
+    const l = { ...this.cfg, ...limits };
+    if (q.priceImpactPct !== undefined && q.priceImpactPct > l.maxPriceImpactPct) {
+      return { ok: false, reason: `price impact ${q.priceImpactPct.toFixed(2)}% > ${l.maxPriceImpactPct}%` };
     }
-    if (q.slippageBps !== undefined && q.slippageBps > this.cfg.maxSlippageBps) {
-      return { ok: false, reason: `slippage ${q.slippageBps}bps > ${this.cfg.maxSlippageBps}bps` };
+    if (q.slippageBps !== undefined && q.slippageBps > l.maxSlippageBps) {
+      return { ok: false, reason: `slippage ${q.slippageBps}bps > ${l.maxSlippageBps}bps` };
     }
-    if (q.roundTripLossPct !== undefined && q.roundTripLossPct > this.cfg.maxRoundTripLossPct) {
-      return { ok: false, reason: `sell-path check: buying then selling loses ${q.roundTripLossPct.toFixed(1)}% (> ${this.cfg.maxRoundTripLossPct}%): likely transfer tax or unsellable` };
+    if (q.roundTripLossPct !== undefined && q.roundTripLossPct > l.maxRoundTripLossPct) {
+      return { ok: false, reason: `sell-path check: buying then selling loses ${q.roundTripLossPct.toFixed(1)}% (> ${l.maxRoundTripLossPct}%): likely transfer tax or unsellable` };
     }
     return { ok: true };
   }
